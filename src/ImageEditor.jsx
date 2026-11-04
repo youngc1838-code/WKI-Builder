@@ -5,27 +5,48 @@ import {
   ANNOTATION_COLORS,
   LINE_THICKNESS,
   annotationFromDrag,
+  CALLOUT_BLUE,
+  calloutMetrics,
   contentFrame,
   createPlacedAnnotation,
   geometry,
   normalizeAnnotations,
+  placeBalloonAnchor,
   remapAnnotations,
   resolveAnnotations,
 } from './annotations.js'
 import { loadHtmlImage, renderComposite } from './composite.js'
 import CropDialog from './CropDialog.jsx'
+import { capitalizeSentences } from './textCase.js'
 
 const TOOLS = [
   { id: 'select', label: 'Select' },
   { id: 'arrow', label: 'Arrow' },
   { id: 'rect', label: 'Rectangle' },
   { id: 'ellipse', label: 'Circle' },
-  { id: 'text', label: 'Label' },
+  { id: 'text', label: 'Text' },
   { id: 'callout', label: 'Callout' },
+  { id: 'balloon', label: 'Balloon' },
 ]
 
 function clone(value) {
   return structuredClone(value)
+}
+
+function balloonPartNote(item, bomLines) {
+  const part = (bomLines || []).find((line) => line.id === item.bomLineId)
+  const name = part?.partNumber ? ` stays with ${part.partNumber}.` : ' stays with that part.'
+  return `Balloon ${item.number}${name} It shows the number only. Use Text to write on the photo.`
+}
+
+function withBomNumbers(items, bomLines) {
+  const byId = new Map((bomLines || []).map((line) => [line.id, line]))
+  return items.map((item) => {
+    if (item.type !== 'callout' || !item.bomLineId) return item
+    const line = byId.get(item.bomLineId)
+    if (!line) return item
+    return { ...item, number: line.balloon, text: '' }
+  })
 }
 
 function annotationIdFrom(node) {
@@ -46,7 +67,7 @@ function isHandle(node) {
   return false
 }
 
-function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
+function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrimmed }) {
   const frameRef = useRef(null)
   const transformerRef = useRef(null)
   const nodeRefs = useRef({})
@@ -61,7 +82,8 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
   const [loadError, setLoadError] = useState('')
   const [items, setItems] = useState([])
   const [tool, setTool] = useState('select')
-  const [color, setColor] = useState(ANNOTATION_COLORS[0].value)
+  const [balloonId, setBalloonId] = useState('')
+  const [color, setColor] = useState(CALLOUT_BLUE)
   const [stroke, setStroke] = useState(LINE_THICKNESS[1].value)
   const [selectedId, setSelectedId] = useState(null)
   const [zoom, setZoom] = useState(1)
@@ -79,7 +101,10 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
     loadHtmlImage(src)
       .then((image) => {
         if (cancelled) return
-        const resolved = resolveAnnotations(annotations, image.naturalWidth, image.naturalHeight)
+        const resolved = withBomNumbers(
+          resolveAnnotations(annotations, image.naturalWidth, image.naturalHeight),
+          bomLines,
+        )
         annotationsRef.current = resolved
         initialJsonRef.current = JSON.stringify(resolved)
         setItems(resolved)
@@ -267,6 +292,30 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
     }
   }
 
+  function makeCallout(point, extra = {}) {
+    const anchor = placeBalloonAnchor(point, imageWidth, imageHeight)
+    return createPlacedAnnotation(
+      'callout',
+      { x: anchor.x, y: anchor.y },
+      annotationsRef.current,
+      { color: CALLOUT_BLUE, stroke },
+      { ...extra, tipX: anchor.tipX, tipY: anchor.tipY },
+    )
+  }
+
+  function placeBalloon(point, lineId) {
+    const line = (bomLines || []).find((item) => item.id === lineId)
+    if (!line || !point) return
+    const created = makeCallout(point, {
+      number: line.balloon,
+      text: '',
+      bomLineId: line.id,
+    })
+    if (!created) return
+    replace([...annotationsRef.current, created])
+    setSelectedId(created.id)
+  }
+
   function onPointerDown(event) {
     setMenu(null)
     if (event.evt && event.evt.button !== 0) return
@@ -285,8 +334,15 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
       drawingRef.current = { kind: 'pan', startX: event.evt.clientX, startY: event.evt.clientY, pan: { ...pan } }
       return
     }
+    if (tool === 'balloon') {
+      placeBalloon(point, balloonId)
+      return
+    }
     if (tool === 'callout' || tool === 'text') {
-      const created = createPlacedAnnotation(tool, point, annotationsRef.current, { color, stroke })
+      const created =
+        tool === 'callout'
+          ? makeCallout(point)
+          : createPlacedAnnotation(tool, point, annotationsRef.current, { color, stroke })
       if (!created) return
       replace([...annotationsRef.current, created])
       setSelectedId(created.id)
@@ -401,9 +457,29 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
 
   function moveCenter(id, x, y, record) {
     const previous = dragBeforeRef.current || annotationsRef.current
+    const origin = previous.find((item) => item.id === id)
+    const { radius } = origin?.type === 'callout' ? calloutMetrics(imageWidth, imageHeight) : { radius: 0 }
+    const nextX = origin?.type === 'callout' ? Math.min(imageWidth - radius, Math.max(radius, x)) : x
+    const nextY = origin?.type === 'callout' ? Math.min(imageHeight - radius, Math.max(radius, y)) : y
     const next = annotationsRef.current.map((item) =>
       item.id === id
-        ? { ...item, x: (x / imageWidth) * 100, y: (y / imageHeight) * 100 }
+        ? { ...item, x: (nextX / imageWidth) * 100, y: (nextY / imageHeight) * 100 }
+        : item,
+    )
+    if (record) replace(next, previous)
+    else {
+      annotationsRef.current = next
+      setItems(next)
+    }
+  }
+
+  function moveTip(id, x, y, record) {
+    const previous = dragBeforeRef.current || annotationsRef.current
+    const tipX = Math.min(imageWidth, Math.max(0, x))
+    const tipY = Math.min(imageHeight, Math.max(0, y))
+    const next = annotationsRef.current.map((item) =>
+      item.id === id
+        ? { ...item, tipX: (tipX / imageWidth) * 100, tipY: (tipY / imageHeight) * 100 }
         : item,
     )
     if (record) replace(next, previous)
@@ -430,7 +506,10 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
   return portal(
     <EditorShell
       tool={tool}
-      setTool={setTool}
+      setTool={(next) => {
+        if (next === 'balloon' && !balloonId && bomLines[0]) setBalloonId(bomLines[0].id)
+        setTool(next)
+      }}
       color={color}
       stroke={stroke}
       onColor={(value) => {
@@ -510,6 +589,7 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
                     onArrowMove={(dx, dy, record) => moveArrow(item.id, dx, dy, record)}
                     onBoxMove={(x, y, record) => moveBox(item.id, x, y, record)}
                     onCenterMove={(x, y, record) => moveCenter(item.id, x, y, record)}
+                    onTipMove={(x, y, record) => moveTip(item.id, x, y, record)}
                     onEndpoint={(which, x, y, record) => {
                       const previous = dragBeforeRef.current || annotationsRef.current
                       const origin = previous.find((entry) => entry.id === item.id)
@@ -544,13 +624,43 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
           </Stage>
         </div>
         <aside className="annotation-side">
+          <h4>Add a balloon</h4>
+          {bomLines.length === 0 ? (
+            <p className="markup-note">Import a bill of materials first. Then choose a part and click it in the photo.</p>
+          ) : (
+            <>
+              <p className="markup-note">
+                Choose a part, then click that part in the photo. The balloon shows that part’s number and stays
+                tied to it. Drag the balloon, or drag the leader point onto the part. Use Text for words.
+              </p>
+              <ul className="callout-index">
+                {bomLines.map((line) => (
+                  <li key={line.id}>
+                    <button
+                      type="button"
+                      className={tool === 'balloon' && balloonId === line.id ? 'markup-select selected' : 'markup-select'}
+                      onClick={() => {
+                        setBalloonId(line.id)
+                        setTool('balloon')
+                      }}
+                    >
+                      {line.balloon}. {line.partNumber || 'Part'}
+                      {line.description ? ` · ${line.description}` : ''}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <h4>Selected mark</h4>
           {selected?.type === 'text' ? (
             <label className="field">
-              <span className="field-label">Label text</span>
+              <span className="field-label">Text</span>
               <input
                 value={selected.text}
-                onChange={(event) => patchSelected({ text: event.target.value }, false)}
+                onChange={(event) =>
+                  patchSelected({ text: capitalizeSentences(event.target.value) }, false)
+                }
                 onBlur={() => {
                   if (dragBeforeRef.current) {
                     replace(annotationsRef.current, dragBeforeRef.current)
@@ -564,7 +674,9 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
             </label>
           ) : null}
           {selected?.type === 'callout' ? (
-            <>
+            selected.bomLineId ? (
+              <p className="markup-note">{balloonPartNote(selected, bomLines)}</p>
+            ) : (
               <label className="field">
                 <span className="field-label">Callout number</span>
                 <input
@@ -588,25 +700,7 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
                   }}
                 />
               </label>
-              <label className="field">
-                <span className="field-label">Description</span>
-                <textarea
-                  rows={3}
-                  value={selected.text}
-                  placeholder="What this number points to"
-                  onChange={(event) => patchSelected({ text: event.target.value }, false)}
-                  onFocus={() => {
-                    dragBeforeRef.current = clone(annotationsRef.current)
-                  }}
-                  onBlur={() => {
-                    if (dragBeforeRef.current) {
-                      replace(annotationsRef.current, dragBeforeRef.current)
-                      dragBeforeRef.current = null
-                    }
-                  }}
-                />
-              </label>
-            </>
+            )
           ) : null}
           {selected && selected.type !== 'text' && selected.type !== 'callout' ? (
             <p className="markup-note">Drag the mark to move it. Drag a handle to resize it.</p>
@@ -653,7 +747,9 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
                 .map((item) => (
                   <li key={item.id}>
                     <button type="button" className="markup-select" onClick={() => setSelectedId(item.id)}>
-                      {item.number}. {item.text.trim() || 'No description yet'}
+                      {item.bomLineId
+                        ? `Balloon ${item.number}`
+                        : `Callout ${item.number}`}
                     </button>
                   </li>
                 ))}
@@ -682,13 +778,28 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
           }}
           onAddCallout={() => {
             if (!menu.point) return
-            const created = createPlacedAnnotation('callout', menu.point, annotationsRef.current, { color, stroke })
+            const created = makeCallout(menu.point)
             if (!created) return
             replace([...annotationsRef.current, created])
             setSelectedId(created.id)
             setTool('select')
             setMenu(null)
           }}
+          onAddBalloon={() => {
+            if (!menu.point) return
+            placeBalloon(menu.point, balloonId)
+            setMenu(null)
+          }}
+          onAddText={() => {
+            if (!menu.point) return
+            const created = createPlacedAnnotation('text', menu.point, annotationsRef.current, { color, stroke })
+            if (!created) return
+            replace([...annotationsRef.current, created])
+            setSelectedId(created.id)
+            setTool('select')
+            setMenu(null)
+          }}
+          balloonReady={Boolean(balloonId)}
           onFit={() => {
             setZoom(1)
             setPan({ x: 0, y: 0 })
@@ -705,7 +816,7 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
         <CropDialog
           src={src}
           title="Trim photo"
-          detail="Drag the frame edges to cut the photo. The frame starts active, so you do not need to click the photo first. Marks stay with the area you keep."
+          detail="Drag any edge, including the bottom, to trim. A studio background replaces the bench. Marks stay with the area you keep."
           onCancel={() => setTrimming(false)}
           onUseWhole={() => setTrimming(false)}
           onApply={applyTrim}
@@ -716,15 +827,28 @@ function ImageEditor({ src, annotations, onCancel, onSave, onTrimmed }) {
 }
 
 function markLabel(item) {
-  if (item.type === 'callout') return `Callout ${item.number}. ${item.text.trim() || 'No description yet'}`
-  if (item.type === 'text') return `Label. ${item.text.trim() || 'Label'}`
+  if (item.type === 'callout') return item.bomLineId ? `Balloon ${item.number}` : `Callout ${item.number}`
+  if (item.type === 'text') return `Text. ${item.text.trim() || 'Text'}`
   if (item.type === 'arrow') return 'Arrow'
   if (item.type === 'rect') return 'Rectangle'
   if (item.type === 'ellipse') return 'Circle'
   return 'Mark'
 }
 
-function FormatMenu({ menu, mark, onColor, onStroke, onDelete, onAddCallout, onFit, onTrim, onClose }) {
+function FormatMenu({
+  menu,
+  mark,
+  onColor,
+  onStroke,
+  onDelete,
+  onAddCallout,
+  onAddBalloon,
+  onAddText,
+  balloonReady,
+  onFit,
+  onTrim,
+  onClose,
+}) {
   const menuRef = useRef(null)
   const [place, setPlace] = useState({ left: menu.x, top: menu.y })
 
@@ -776,11 +900,19 @@ function FormatMenu({ menu, mark, onColor, onStroke, onDelete, onAddCallout, onF
           </button>
         ))}
       </div>
-      {mark?.type === 'callout' ? (
-        <p className="context-menu-note">Edit the callout number and description in the side panel.</p>
+      {mark?.type === 'callout' && mark.bomLineId ? (
+        <p className="context-menu-note">
+          The balloon shows that part’s number only. Drag the balloon, or drag the leader point onto the part.
+        </p>
       ) : null}
+      <button type="button" onClick={onAddBalloon} disabled={!menu.point || !balloonReady}>
+        Add balloon here
+      </button>
       <button type="button" onClick={onAddCallout} disabled={!menu.point}>
         Add callout here
+      </button>
+      <button type="button" onClick={onAddText} disabled={!menu.point}>
+        Add text here
       </button>
       <button type="button" onClick={onFit}>
         Fit photo
@@ -849,6 +981,7 @@ function AnnotationShape({
   onArrowMove,
   onBoxMove,
   onCenterMove,
+  onTipMove,
   onEndpoint,
   onTransformEnd,
 }) {
@@ -989,7 +1122,7 @@ function AnnotationShape({
           y={6}
           text={label}
           fontSize={box.fontSize}
-          fontStyle="bold"
+          fontStyle="normal"
           fontFamily="Segoe UI, sans-serif"
           fill="#1b2430"
           listening={false}
@@ -997,46 +1130,73 @@ function AnnotationShape({
       </Group>
     )
   }
-  const note = item.text.trim()
-  const noteSize = Math.max(14, box.radius * 0.85)
   return (
-    <Group
-      {...common}
-      ref={nodeRef}
-      x={box.x}
-      y={box.y}
-      onDragEnd={(event) => onCenterMove(event.target.x(), event.target.y(), true)}
-    >
-      <Circle radius={box.radius + (selected ? 4 : 0)} stroke={selected ? '#0e4d7b' : undefined} strokeWidth={selected ? 2 : 0} />
-      <Circle radius={box.radius} fill={item.color} stroke="#ffffff" strokeWidth={3} />
-      <Text
-        text={String(item.number || '')}
-        fontSize={Math.max(12, box.radius)}
-        fontStyle="bold"
-        fontFamily="Segoe UI, sans-serif"
-        fill="#ffffff"
-        width={box.radius * 2}
-        offsetX={box.radius}
-        offsetY={Math.max(12, box.radius) / 2}
-        align="center"
-        listening={false}
-      />
-      {note ? (
+    <>
+      {box.showLeader ? (
+        <>
+          <Arrow
+            points={[box.edgeX, box.edgeY, box.tipX, box.tipY]}
+            stroke="#ffffff"
+            fill="#ffffff"
+            strokeWidth={box.leaderWidth + Math.max(1.5, box.leaderWidth * 0.7)}
+            pointerLength={box.head + 1}
+            pointerWidth={box.head + 1}
+            lineCap="round"
+            listening={false}
+          />
+          <Arrow
+            points={[box.edgeX, box.edgeY, box.tipX, box.tipY]}
+            stroke={item.color}
+            fill={item.color}
+            strokeWidth={box.leaderWidth}
+            pointerLength={box.head}
+            pointerWidth={box.head}
+            lineCap="round"
+            listening={false}
+          />
+        </>
+      ) : null}
+      <Group
+        {...common}
+        ref={nodeRef}
+        x={box.x}
+        y={box.y}
+        onDragMove={(event) => onCenterMove(event.target.x(), event.target.y(), false)}
+        onDragEnd={(event) => onCenterMove(event.target.x(), event.target.y(), true)}
+      >
+        <Circle radius={box.radius + (selected ? 3 / scale : 0)} stroke={selected ? '#083656' : undefined} strokeWidth={selected ? 2 / scale : 0} />
+        <Circle radius={box.radius} fill={item.color} stroke="#ffffff" strokeWidth={Math.max(1.5, box.leaderWidth)} />
         <Text
-          x={box.radius + 8}
-          y={-noteSize / 2}
-          text={note}
-          fontSize={noteSize}
+          text={String(item.number || '')}
+          fontSize={box.numberSize}
           fontStyle="bold"
           fontFamily="Segoe UI, sans-serif"
-          fill="#1b2430"
-          stroke="#ffffff"
-          strokeWidth={4}
-          fillAfterStrokeEnabled
+          fill="#ffffff"
+          width={box.radius * 2}
+          height={box.radius * 2}
+          offsetX={box.radius}
+          offsetY={box.radius}
+          align="center"
+          verticalAlign="middle"
           listening={false}
         />
+      </Group>
+      {selected ? (
+        <Circle
+          name="handle"
+          x={box.tipX}
+          y={box.tipY}
+          radius={8 / scale}
+          fill="#ffffff"
+          stroke={item.color}
+          strokeWidth={2 / scale}
+          draggable
+          onDragStart={onDragStart}
+          onDragMove={(event) => onTipMove(event.target.x(), event.target.y(), false)}
+          onDragEnd={(event) => onTipMove(event.target.x(), event.target.y(), true)}
+        />
       ) : null}
-    </Group>
+    </>
   )
 }
 
@@ -1077,8 +1237,9 @@ function EditorShell({
           <div>
             <h3 id="annotation-title">Edit photo annotations</h3>
             <p>
-              The photo sits on a blank sheet. Drag arrows and callouts onto that sheet. Right-click for color,
-              line weight, and callouts. Save keeps the original photo and a finished picture.
+              Click the part. A blue balloon and leader appear with that part’s number only. Drag the balloon, or
+              drag the leader point onto the part. Choose Text to write on the photo. Save keeps the original photo
+              and a finished picture.
             </p>
           </div>
           <div className="annotation-dialog-actions">

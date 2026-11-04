@@ -1,16 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { getImage, prepareImageBlob, putImage } from './imageStore.js'
+import { storagePlaceLabel } from './storage.js'
 import ImageEditor from './ImageEditor.jsx'
 import CropDialog from './CropDialog.jsx'
 import { renderComposite, loadHtmlImage } from './composite.js'
 import { remapAnnotations } from './annotations.js'
-import PrintSheet from './PrintSheet.jsx'
+import PrintSheet, { editorContents } from './PrintSheet.jsx'
 import ImageGallery from './ImageGallery.jsx'
 import RichTextBox from './RichTextBox.jsx'
+import { BomList, StepBalloons } from './BomList.jsx'
 import { plainText } from './richText.js'
+import { capitalizeSentences } from './textCase.js'
+import { passcodeMatches } from './passcode.js'
 import {
   DOCUMENT_TYPES,
+  TOOL_KINDS,
+  createBomLine,
+  nextBalloonNumber,
   createStep,
+  createToolItem,
   formatWhen,
   isLockedStatus,
   prepareForSave,
@@ -19,6 +28,157 @@ import {
 } from './model.js'
 
 const emptyErrors = { fieldErrors: {}, messages: [] }
+
+function moveItem(list, from, to) {
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return list
+  const next = [...list]
+  const [item] = next.splice(from, 1)
+  next.splice(to, 0, item)
+  return next
+}
+
+function stripBomBalloons(images) {
+  return (images || []).map((image) => ({
+    ...image,
+    annotations: (image.annotations || []).filter((item) => !(item.type === 'callout' && item.bomLineId)),
+  }))
+}
+
+function ToolList({
+  title,
+  note,
+  emptyText,
+  tools,
+  legacy,
+  locked,
+  onChangeTools,
+  onChangeLegacy,
+}) {
+  const dragFrom = useRef(null)
+
+  function updateTool(id, patch) {
+    onChangeTools(tools.map((tool) => (tool.id === id ? { ...tool, ...patch } : tool)))
+  }
+
+  return (
+    <div className="tool-list">
+      <h4>{title}</h4>
+      <p className="tool-list-note">
+        {note}
+        {locked ? '' : ' Drag a row by the arrows to change its order. That order is the order on the printed page.'}
+      </p>
+      <div className="tool-columns" aria-hidden="true">
+        <span />
+        <span>Item</span>
+        <span>Kind</span>
+        <span>Identifier</span>
+        <span>Description</span>
+        <span />
+      </div>
+      {tools.length === 0 ? <p className="tool-empty">{emptyText}</p> : null}
+      {tools.map((tool, index) => (
+        <div
+          className="tool-row"
+          key={tool.id}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault()
+            const from = dragFrom.current
+            dragFrom.current = null
+            if (locked || from == null) return
+            onChangeTools(moveItem(tools, from, index))
+          }}
+        >
+          {locked ? (
+            <span />
+          ) : (
+            <button
+              type="button"
+              className="drag-handle"
+              draggable
+              aria-label={`Drag item ${index + 1}`}
+              onDragStart={() => {
+                dragFrom.current = index
+              }}
+              onDragEnd={() => {
+                dragFrom.current = null
+              }}
+            >
+              ↕
+            </button>
+          )}
+          <span className="tool-item-no">{index + 1}</span>
+          <label>
+            <span className="tool-field-label">Kind</span>
+            <select
+              value={tool.kind}
+              disabled={locked}
+              aria-label={`Kind for item ${index + 1}`}
+              onChange={(event) => updateTool(tool.id, { kind: event.target.value })}
+            >
+              {TOOL_KINDS.map((kind) => (
+                <option key={kind} value={kind}>
+                  {kind}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="tool-field-label">Identifier</span>
+            <input
+              value={tool.identifier}
+              readOnly={locked}
+              placeholder="SP-14 or Loctite 243"
+              spellCheck
+              aria-label={`Identifier for item ${index + 1}`}
+              onChange={(event) =>
+                updateTool(tool.id, { identifier: capitalizeSentences(event.target.value) })
+              }
+            />
+          </label>
+          <label>
+            <span className="tool-field-label">Description</span>
+            <input
+              value={tool.description}
+              readOnly={locked}
+              placeholder="What this item is"
+              spellCheck
+              aria-label={`Description for item ${index + 1}`}
+              onChange={(event) =>
+                updateTool(tool.id, { description: capitalizeSentences(event.target.value) })
+              }
+            />
+          </label>
+          {locked ? (
+            <span />
+          ) : (
+            <button
+              type="button"
+              className="btn btn-secondary tool-remove"
+              onClick={() => onChangeTools(tools.filter((item) => item.id !== tool.id))}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+      {locked ? null : (
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => onChangeTools([...tools, createToolItem()])}
+        >
+          Add item
+        </button>
+      )}
+      {plainText(legacy) ? (
+        <Field label="Earlier tools or parts note" wide hint="Older free-text note. Move these items into the list above.">
+          <RichTextBox value={legacy} readOnly={locked} onChange={onChangeLegacy} />
+        </Field>
+      ) : null}
+    </div>
+  )
+}
 
 function Field({ label, required, hint, error, wide, children }) {
   return (
@@ -64,6 +224,10 @@ function withImages(doc, target, images) {
 function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, onDelete, onRegisterFlush }) {
   const [form, setForm] = useState(initialDocument)
   const [locked, setLocked] = useState(isLockedStatus(initialDocument.status))
+  const [passcodeRequest, setPasscodeRequest] = useState(null)
+  const [passcodeValue, setPasscodeValue] = useState('')
+  const [passcodeError, setPasscodeError] = useState('')
+  const [quantityEditId, setQuantityEditId] = useState(null)
   const [errors, setErrors] = useState(emptyErrors)
   const [notice, setNotice] = useState('')
   const [saveFailed, setSaveFailed] = useState(false)
@@ -75,6 +239,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
   const [cardMenu, setCardMenu] = useState(null)
   const [cardTrim, setCardTrim] = useState(null)
   const [showPrint, setShowPrint] = useState(false)
+  const [activeSection, setActiveSection] = useState('edit-cover')
   const previewUrls = useRef([])
   const [savedJson, setSavedJson] = useState(() => JSON.stringify(initialDocument))
   const dirty = JSON.stringify(form) !== savedJson
@@ -181,7 +346,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         setErrors(result)
         return { ok: false, reason: 'required' }
       }
-      const saved = finishSaveRef.current(prepareForSave(current), 'Saved in this browser.')
+      const saved = finishSaveRef.current(prepareForSave(current), `Saved in ${storagePlaceLabel()}.`)
       return saved ? { ok: true } : { ok: false, reason: 'save' }
     })
   }, [onRegisterFlush])
@@ -312,11 +477,11 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
       setEditingImage(null)
       return { ok: true }
     }
-    const saved = finishSave(prepared, 'Saved in this browser.')
+    const saved = finishSave(prepared, `Saved in ${storagePlaceLabel()}.`)
     if (saved) setEditingImage(null)
     return {
       ok: saved,
-      message: saved ? '' : 'The annotations are on this draft, but the browser could not store the document.',
+      message: saved ? '' : 'The annotations are on this draft, but the document could not be stored.',
     }
   }
 
@@ -328,7 +493,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
       setNotice('')
       return
     }
-    finishSave(prepareForSave(form), 'Saved in this browser.')
+    finishSave(prepareForSave(form), `Saved in ${storagePlaceLabel()}.`)
   }
 
   function requestBack() {
@@ -341,15 +506,80 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
     onBack()
   }
 
-  function handleObsolete() {
-    const confirmed = window.confirm(
-      'Mark this released revision obsolete? The wording stays locked, and the record is not deleted.',
-    )
-    if (!confirmed) return
-    finishSave(
-      prepareForSave({ ...form, status: 'Obsolete' }),
-      'Marked obsolete in this browser. This is not an approval.',
-    )
+  function askForPasscode(request) {
+    setPasscodeValue('')
+    setPasscodeError('')
+    setPasscodeRequest(request)
+  }
+
+  function cancelPasscode() {
+    setPasscodeRequest(null)
+    setPasscodeValue('')
+    setPasscodeError('')
+  }
+
+  function submitPasscode(event) {
+    event?.preventDefault()
+    if (!passcodeMatches(passcodeValue)) {
+      setPasscodeError('That passcode is not correct.')
+      return
+    }
+    const request = passcodeRequest
+    cancelPasscode()
+    if (request?.kind === 'status') {
+      changeForm((current) => ({ ...current, status: request.status }))
+      return
+    }
+    if (request?.kind === 'bom-qty') {
+      setQuantityEditId(request.id)
+      return
+    }
+    if (request?.kind === 'bom-add') {
+      changeForm((current) => ({
+        ...current,
+        bomLines: [
+          ...(current.bomLines || []),
+          createBomLine({ balloon: nextBalloonNumber(current.bomLines) }),
+        ],
+      }))
+      return
+    }
+    if (request?.kind === 'bom-remove') {
+      changeForm((current) => ({
+        ...current,
+        bomLines: (current.bomLines || []).filter((line) => line.id !== request.id),
+      }))
+      return
+    }
+    if (request?.kind === 'bom-delete') {
+      const confirmed = window.confirm(
+        'Delete the whole bill of materials? Balloons on steps and pictures that point at these parts are removed. The photos stay.',
+      )
+      if (!confirmed) return
+      changeForm((current) => ({
+        ...current,
+        bomLines: [],
+        coverImages: stripBomBalloons(current.coverImages),
+        completedImages: stripBomBalloons(current.completedImages),
+        bomImages: stripBomBalloons(current.bomImages),
+        steps: (current.steps || []).map((step) => ({
+          ...step,
+          bomLineIds: [],
+          images: stripBomBalloons(step.images),
+        })),
+      }))
+      return
+    }
+    if (request?.kind === 'obsolete') {
+      const confirmed = window.confirm(
+        'Mark this released revision obsolete? The wording stays locked, and the record is not deleted.',
+      )
+      if (!confirmed) return
+      finishSave(
+        prepareForSave({ ...form, status: 'Obsolete' }),
+        `Marked obsolete in ${storagePlaceLabel()}. This is not an approval.`,
+      )
+    }
   }
 
   function invalid(name) {
@@ -373,18 +603,14 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
             ? 'Cover photos'
             : list === 'completedImages'
               ? 'Completed assembly'
-              : list === 'bomImages'
-                ? 'Bill of materials'
-                : 'Images'
+              : 'Images'
         }
         hint={
           list === 'coverImages'
-            ? 'Add one or more photos. The first photo prints behind the assembly name. Right-click a photo to edit or trim it.'
+            ? 'Add one or more photos. The first photo prints behind the assembly name. Right-click a photo to add balloons or trim it.'
             : list === 'completedImages'
-              ? 'Add photos of the completed assembly. Right-click a photo to edit or trim it.'
-              : list === 'bomImages'
-                ? 'Insert the bill of materials picture from the ERP. You can add more than one. Right-click a photo to edit or trim it.'
-                : ''
+              ? 'Add photos of the completed assembly. Right-click a photo to add balloons or trim it.'
+              : 'Right-click a photo and choose Add balloons to mark a part from the bill of materials.'
         }
         images={images}
         locked={locked}
@@ -417,6 +643,33 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
     )
   }
 
+  const contents = editorContents(form)
+  const contentIds = contents.map((entry) => entry.id).join('|')
+
+  useEffect(() => {
+    const ids = contentIds.split('|').filter(Boolean)
+    function onScroll() {
+      let current = ids[0] || ''
+      for (const id of ids) {
+        const node = document.getElementById(id)
+        if (!node) continue
+        if (node.getBoundingClientRect().top <= 96) current = id
+      }
+      setActiveSection(current)
+    }
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [contentIds])
+
+  function jumpToSection(event, id) {
+    event.preventDefault()
+    const node = document.getElementById(id)
+    if (!node) return
+    node.scrollIntoView({ block: 'start' })
+    setActiveSection(id)
+  }
+
   return (
     <form
       className={locked ? 'editor read-only' : 'editor'}
@@ -426,6 +679,27 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         handleSave()
       }}
     >
+      <div className="editor-layout">
+      <nav className="editor-toc" aria-label="Contents">
+        <h3>Contents</h3>
+        <p>Page numbers match the printed sheet. Choose a line to jump there.</p>
+        <ol>
+          {contents.map((entry) => (
+            <li key={entry.id}>
+              <a
+                href={`#${entry.id}`}
+                className={activeSection === entry.id ? 'is-current' : ''}
+                aria-current={activeSection === entry.id ? 'true' : undefined}
+                onClick={(event) => jumpToSection(event, entry.id)}
+              >
+                <span>{entry.label}</span>
+                {entry.page ? <span className="editor-toc-page">{entry.page}</span> : null}
+              </a>
+            </li>
+          ))}
+        </ol>
+      </nav>
+      <div className="editor-main">
       <button type="button" className="btn btn-quiet back-button" onClick={requestBack}>
         Back to documents
       </button>
@@ -456,7 +730,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         <p className="hint">
           To save a draft, enter a title and document number. Starred fields and every step
           instruction are also required for In Review or Released. A reviewer and effective date
-          are required to release. Changing the status here is not a real approval.
+          are required to release. Changing the status asks for a passcode and is not a real approval.
         </p>
       )}
 
@@ -473,7 +747,8 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               value={form.status}
               onChange={(event) => {
                 const status = event.target.value
-                changeForm((current) => ({ ...current, status }))
+                if (status === form.status) return
+                askForPasscode({ kind: 'status', status })
               }}
             >
               <option value="Draft">Draft</option>
@@ -500,7 +775,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
           </button>
         ) : null}
         {locked && form.status === 'Released' ? (
-          <button type="button" className="btn btn-secondary" onClick={handleObsolete}>
+          <button type="button" className="btn btn-secondary" onClick={() => askForPasscode({ kind: 'obsolete' })}>
             Mark obsolete
           </button>
         ) : null}
@@ -537,7 +812,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         </p>
       ) : null}
 
-      <section className="panel">
+      <section className="panel" id="edit-cover">
         <h3>Document information</h3>
         <p className="section-note">
           These details match the introduction page. Fields marked * are required before a
@@ -549,9 +824,10 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               className={invalid('title')}
               value={form.title}
               readOnly={locked}
+              spellCheck
               aria-invalid={Boolean(errors.fieldErrors.title)}
               onChange={(event) => {
-                const title = event.target.value
+                const title = capitalizeSentences(event.target.value)
                 changeForm((current) => ({ ...current, title }))
               }}
             />
@@ -667,7 +943,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         {gallery('coverImages', null, form.coverImages)}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="edit-requirements">
         <h3>General requirements</h3>
         <div className="form-grid">
           <Field label="Purpose" required wide error={errors.fieldErrors.purpose}>
@@ -693,19 +969,34 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               onChange={(safety) => changeForm((current) => ({ ...current, safety }))}
             />
           </Field>
-          <Field label="Required tools and equipment" wide>
-            <RichTextBox
-              value={form.toolsEquipment || ''}
-              readOnly={locked}
-              placeholder="Tools, fixtures, gages, and equipment."
-              onChange={(toolsEquipment) => changeForm((current) => ({ ...current, toolsEquipment }))}
-            />
-          </Field>
-          <Field label="Bill of materials notes" wide hint="Optional. The pictures below print as the bill of materials.">
+          <ToolList
+            title="Tools and equipment"
+            note="List the tools, fixtures, gages, Loctite, adhesives, and other consumables used for this document. Identifier is the tool number, part number, or product name, such as SP-14 or Loctite 243."
+            emptyText="No tools or equipment listed yet."
+            tools={form.equipment || []}
+            legacy={form.toolsEquipment}
+            locked={locked}
+            onChangeTools={(equipment) => changeForm((current) => ({ ...current, equipment }))}
+            onChangeLegacy={(toolsEquipment) => changeForm((current) => ({ ...current, toolsEquipment }))}
+          />
+          <div id="edit-bom">
+          <BomList
+            lines={form.bomLines || []}
+            locked={locked}
+            onChange={(bomLines) => changeForm((current) => ({ ...current, bomLines }))}
+            quantityEditId={quantityEditId}
+            onAdd={() => askForPasscode({ kind: 'bom-add' })}
+            onRemove={(id) => askForPasscode({ kind: 'bom-remove', id })}
+            onDelete={() => askForPasscode({ kind: 'bom-delete' })}
+            onEditQuantity={(id) => askForPasscode({ kind: 'bom-qty', id })}
+            onQuantityDone={() => setQuantityEditId(null)}
+          />
+          </div>
+          <Field label="Bill of materials notes" wide hint="Optional. These notes print on the requirements page.">
             <RichTextBox
               value={form.materialsParts || ''}
               readOnly={locked}
-              placeholder="Optional notes. Use the pictures for the ERP bill of materials."
+              placeholder="Optional notes about the bill of materials."
               onChange={(materialsParts) => changeForm((current) => ({ ...current, materialsParts }))}
             />
           </Field>
@@ -718,7 +1009,6 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
             />
           </Field>
         </div>
-        {gallery('bomImages', null, form.bomImages)}
         {gallery('completedImages', null, form.completedImages)}
       </section>
 
@@ -726,9 +1016,10 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         <h3>Procedure steps</h3>
         <p className="section-note">
           Add steps in the order a technician should perform them. Step numbers follow that
-          order. Each step needs instruction text before review or release. Photos stay with
-          the step they were added to. Right-click a photo to edit or trim it. You do not have to click the
-          photo itself.
+          order. Each step needs instruction text before review or release. On each step, list
+          tools, fixtures, gages, Loctite, adhesives, and other consumables, and give every item
+          an identifier. Photos stay with the step they were added to. Right-click a photo to
+          edit or trim it. You do not have to click the photo itself.
         </p>
         {imageMessage ? <p className="field-error">{imageMessage}</p> : null}
         {errors.fieldErrors.steps ? <p className="field-error">{errors.fieldErrors.steps}</p> : null}
@@ -736,7 +1027,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         {form.steps.length === 0 ? <p className="empty">No steps yet.</p> : null}
 
         {form.steps.map((step, index) => (
-          <article key={step.id} className="step-card">
+          <article key={step.id} id={`edit-step-${step.id}`} className="step-card">
             <div className="step-index">
               <span>Step</span>
               <strong>{index + 1}</strong>
@@ -747,8 +1038,9 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                   <input
                     value={step.title || ''}
                     readOnly={locked}
+                    spellCheck
                     onChange={(event) => {
-                      const title = event.target.value
+                      const title = capitalizeSentences(event.target.value)
                       changeForm((current) => ({
                         ...current,
                         steps: current.steps.map((item) =>
@@ -773,20 +1065,48 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                     }
                   />
                 </Field>
-                <Field label="Required tools or parts">
-                  <RichTextBox
-                    value={step.toolsOrParts}
-                    readOnly={locked}
-                    onChange={(toolsOrParts) =>
-                      changeForm((current) => ({
-                        ...current,
-                        steps: current.steps.map((item) =>
-                          item.id === step.id ? { ...item, toolsOrParts } : item,
-                        ),
-                      }))
-                    }
-                  />
-                </Field>
+                <ToolList
+                  title="Tools, consumables, and supplies"
+                  note="Add every item this step uses. Include hand tools, fixtures, gages, Loctite, adhesives, solvents, and other consumables. Identifier is the tool number, part number, or product name, such as SP-14 or Loctite 243."
+                  emptyText="No items on this step yet."
+                  tools={step.tools || []}
+                  legacy={step.toolsOrParts}
+                  locked={locked}
+                  onChangeTools={(tools) =>
+                    changeForm((current) => ({
+                      ...current,
+                      steps: current.steps.map((item) => (item.id === step.id ? { ...item, tools } : item)),
+                    }))
+                  }
+                  onChangeLegacy={(toolsOrParts) =>
+                    changeForm((current) => ({
+                      ...current,
+                      steps: current.steps.map((item) =>
+                        item.id === step.id ? { ...item, toolsOrParts } : item,
+                      ),
+                    }))
+                  }
+                />
+                <StepBalloons
+                  lines={form.bomLines || []}
+                  selectedIds={step.bomLineIds}
+                  stepId={step.id}
+                  steps={form.steps.map((item, stepIndex) => ({
+                    id: item.id,
+                    number: stepIndex + 1,
+                    title: item.title,
+                    bomLineIds: item.bomLineIds || [],
+                  }))}
+                  locked={locked}
+                  onChange={(bomLineIds) =>
+                    changeForm((current) => ({
+                      ...current,
+                      steps: current.steps.map((item) =>
+                        item.id === step.id ? { ...item, bomLineIds } : item,
+                      ),
+                    }))
+                  }
+                />
                 <Field label="Quality check or acceptance criteria">
                   <RichTextBox
                     value={step.qualityCheck}
@@ -932,10 +1252,13 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
           </button>
         )}
       </section>
+      </div>
+      </div>
       {openImage && imageUrls[openImage.id] ? (
         <ImageEditor
           src={imageUrls[openImage.id]}
           annotations={openImage.annotations || []}
+          bomLines={form.bomLines || []}
           onCancel={() => setEditingImage(null)}
           onSave={saveImageAnnotations}
           onTrimmed={(blob, annotations) =>
@@ -947,7 +1270,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         <CropDialog
           src={importItem.url}
           title="Trim photo"
-          detail={`Photo ${importCrop.index + 1} of ${importCrop.items.length}. Drag the frame edges to cut the photo before it is added. The frame is already active.`}
+          detail={`Photo ${importCrop.index + 1} of ${importCrop.items.length}. Drag the frame edges to trim. Choose a studio background to replace the bench.`}
           onCancel={() => advanceImport(importCrop)}
           onUseWhole={() => acceptImport(importItem.file)}
           onApply={(blob) => acceptImport(blob)}
@@ -957,7 +1280,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         <CropDialog
           src={imageUrls[trimImage.id]}
           title="Trim photo"
-          detail="Drag the frame edges to cut the photo. Marks stay with the area you keep."
+          detail="Drag any edge, including the bottom, to trim. A studio background replaces the bench. Marks stay with the area you keep."
           onCancel={() => setCardTrim(null)}
           onUseWhole={() => setCardTrim(null)}
           onApply={async (blob, crop) => {
@@ -992,7 +1315,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                 setCardMenu(null)
               }}
             >
-              Edit annotations
+              Add balloons
             </button>
             <button
               type="button"
@@ -1016,6 +1339,56 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         onBack={() => setShowPrint(false)}
         onPrint={() => window.print()}
       />
+      {passcodeRequest
+        ? createPortal(
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" role="dialog" aria-labelledby="passcode-title">
+            <h3 id="passcode-title">Passcode required</h3>
+            <p>
+              {passcodeRequest.kind === 'obsolete'
+                ? 'Enter the passcode to mark this revision obsolete.'
+                : passcodeRequest.kind === 'bom-add'
+                  ? 'Enter the passcode to add a part.'
+                  : passcodeRequest.kind === 'bom-remove'
+                    ? 'Enter the passcode to remove this part.'
+                    : passcodeRequest.kind === 'bom-delete'
+                      ? 'Enter the passcode to delete the whole bill of materials.'
+                      : passcodeRequest.kind === 'bom-qty'
+                        ? 'Enter the passcode to change this quantity.'
+                        : `Enter the passcode to change the status to ${passcodeRequest.status}.`}
+            </p>
+            <label className="field">
+              Passcode
+              <input
+                type="password"
+                autoFocus
+                inputMode="numeric"
+                value={passcodeValue}
+                onChange={(event) => {
+                  setPasscodeValue(event.target.value)
+                  setPasscodeError('')
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    submitPasscode(event)
+                  }
+                }}
+              />
+            </label>
+            {passcodeError ? <p className="field-error">{passcodeError}</p> : null}
+            <div className="backup-actions">
+              <button type="button" className="btn btn-primary" onClick={submitPasscode}>
+                Continue
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={cancelPasscode}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
     </form>
   )
 }

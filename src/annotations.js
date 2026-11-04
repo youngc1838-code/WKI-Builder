@@ -21,6 +21,13 @@ export const LINE_THICKNESS = [
 const TYPES = ['arrow', 'rect', 'ellipse', 'text', 'callout']
 const DEFAULT_COLOR = '#8d2f2f'
 const DEFAULT_STROKE = 0.5
+// Balloons are sized for a photo printed on letter paper, not for the camera pixel size.
+export const CALLOUT_BLUE = '#0e4d7b'
+const LETTER_PHOTO_IN = { w: 7.4, h: 5.2 }
+const BALLOON_DIAMETER_IN = 0.28
+const LABEL_PT = 8
+const DETAIL_PT = 6.5
+const LABEL_MIN_PT = 5.5
 
 function clamp(value, min, max, fallback) {
   const number = Number(value)
@@ -83,7 +90,12 @@ export function normalizeAnnotation(raw) {
   if (raw.type === 'callout') {
     const number = Number(raw.number)
     item.number = Number.isInteger(number) && number > 0 && number < 1000 ? number : 1
-    item.size = clamp(raw.size, 1, 30, 2.4)
+    item.size = clamp(raw.size, 1, 30, 3.2)
+    item.bomLineId = raw.bomLineId ? String(raw.bomLineId) : ''
+    if (raw.tipX !== undefined && raw.tipX !== null && raw.tipX !== '') {
+      item.tipX = clamp(raw.tipX, 0, 100, item.x)
+      item.tipY = clamp(raw.tipY, 0, 100, item.y)
+    }
   }
   return item
 }
@@ -106,7 +118,7 @@ export function annotationsFromImage(raw) {
 export function roundAnnotation(item) {
   const next = normalizeAnnotation(item)
   if (!next) return null
-  for (const key of ['x', 'y', 'w', 'h', 'x2', 'y2', 'r', 'stroke', 'fontSize', 'size']) {
+  for (const key of ['x', 'y', 'w', 'h', 'x2', 'y2', 'r', 'stroke', 'fontSize', 'size', 'tipX', 'tipY']) {
     if (next[key] !== undefined) next[key] = round(next[key])
   }
   next.text = String(next.text || '').trim()
@@ -128,6 +140,167 @@ export function strokePixels(item, imageWidth) {
 function percent(pixel, size) {
   if (!size) return 0
   return (pixel / size) * 100
+}
+
+function sourcePixelsPerInch(imageWidth, imageHeight) {
+  const width = Math.max(1, imageWidth)
+  const height = Math.max(1, imageHeight)
+  const inchesPerPixel = Math.min(LETTER_PHOTO_IN.w / width, LETTER_PHOTO_IN.h / height)
+  return 1 / inchesPerPixel
+}
+
+let measureCanvas = null
+
+function textWidth(text, fontSize, weight) {
+  if (!text) return 0
+  if (typeof document === 'undefined') return text.length * fontSize * 0.56
+  if (!measureCanvas) measureCanvas = document.createElement('canvas')
+  const context = measureCanvas.getContext('2d')
+  context.font = `${weight} ${fontSize}px "Segoe UI", sans-serif`
+  return context.measureText(text).width
+}
+
+function labelParts(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return { title: '', detail: '' }
+  const pieces = raw.split(' · ')
+  return { title: pieces[0], detail: pieces.slice(1).join(' · ') }
+}
+
+export function calloutMetrics(imageWidth, imageHeight) {
+  const pxPerIn = sourcePixelsPerInch(imageWidth, imageHeight)
+  return { pxPerIn, radius: (BALLOON_DIAMETER_IN / 2) * pxPerIn }
+}
+
+// Click is the part. The balloon sits beside it so the leader can reach the click.
+export function placeBalloonAnchor(point, imageWidth, imageHeight) {
+  const width = Math.max(1, imageWidth)
+  const height = Math.max(1, imageHeight)
+  const { radius, pxPerIn } = calloutMetrics(width, height)
+  const tipX = clamp((point.x / 100) * width, 0, width, width / 2)
+  const tipY = clamp((point.y / 100) * height, 0, height, height / 2)
+  const gap = radius + 0.42 * pxPerIn
+  const spots = [
+    { x: tipX + gap, y: tipY },
+    { x: tipX - gap, y: tipY },
+    { x: tipX, y: tipY - gap },
+    { x: tipX, y: tipY + gap },
+  ]
+  const fits = (spot) =>
+    spot.x >= radius && spot.x <= width - radius && spot.y >= radius && spot.y <= height - radius
+  const ranked = spots
+    .filter(fits)
+    .map((spot) => {
+      const room = tipX >= spot.x ? spot.x - radius : width - spot.x - radius
+      return { ...spot, room }
+    })
+    .sort((a, b) => b.room - a.room)
+  const chosen = ranked[0] || {
+    x: clamp(tipX, radius, width - radius, width / 2),
+    y: clamp(tipY, radius, height - radius, height / 2),
+  }
+  return {
+    x: (chosen.x / width) * 100,
+    y: (chosen.y / height) * 100,
+    tipX: (tipX / width) * 100,
+    tipY: (tipY / height) * 100,
+  }
+}
+
+function fitCalloutLabel(title, detail, cx, cy, radius, tipX, imageWidth, imageHeight, pxPerIn) {
+  if (!title) return null
+  const margin = Math.max(3, 0.04 * pxPerIn)
+  const gap = Math.max(4, 0.05 * pxPerIn)
+  const titleSize = (LABEL_PT / 72) * pxPerIn
+  const detailSize = detail ? (DETAIL_PT / 72) * pxPerIn : 0
+  const minTitle = (LABEL_MIN_PT / 72) * pxPerIn
+  const sides = [-1, 1]
+    .map((dir) => {
+      const room = dir === 1 ? imageWidth - margin - (cx + radius + gap) : cx - radius - gap - margin
+      const opposite = (tipX - cx) * dir < 0
+      return { dir, room: Math.max(0, room), score: room + (opposite ? imageWidth * 0.25 : 0) }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  for (const side of sides) {
+    if (side.room < 10 && side !== sides[sides.length - 1]) continue
+    const widthAt = (scale) =>
+      Math.max(textWidth(title, titleSize * scale, '700'), detail ? textWidth(detail, detailSize * scale, '400') : 0)
+    let scale = 1
+    const natural = widthAt(1)
+    if (natural > side.room && side.room > 0) scale = side.room / natural
+    let usedTitle = titleSize * scale
+    if (usedTitle < minTitle && side !== sides[sides.length - 1]) continue
+    usedTitle = Math.max(side === sides[sides.length - 1] ? 1 : minTitle, usedTitle)
+    const usedScale = usedTitle / titleSize
+    let width = widthAt(usedScale)
+    if (width > side.room) {
+      const fitRoom = Math.max(8, side.room)
+      if (fitRoom < width && side !== sides[sides.length - 1] && usedTitle < minTitle) continue
+      usedTitle *= fitRoom / Math.max(width, 1)
+      width = fitRoom
+    }
+    const usedDetail = detail ? detailSize * (usedTitle / titleSize) : 0
+    const lineGap = usedDetail ? usedTitle * 0.2 : 0
+    const height = usedTitle + lineGap + usedDetail
+    const y = clamp(cy - height / 2, margin, Math.max(margin, imageHeight - margin - height), margin)
+    const x = side.dir === 1 ? cx + radius + gap : cx - radius - gap - width
+    if (x < margin - 1 && side !== sides[sides.length - 1]) continue
+    return {
+      x: clamp(x, margin, Math.max(margin, imageWidth - margin - width), margin),
+      y,
+      width,
+      title,
+      detail,
+      titleSize: usedTitle,
+      detailSize: usedDetail,
+      lineGap,
+    }
+  }
+  return null
+}
+
+export function calloutLayout(item, imageWidth, imageHeight, stroke) {
+  const width = Math.max(1, imageWidth)
+  const height = Math.max(1, imageHeight)
+  const { pxPerIn, radius } = calloutMetrics(width, height)
+  const cx = clamp((item.x / 100) * width, radius, width - radius, width / 2)
+  const cy = clamp((item.y / 100) * height, radius, height - radius, height / 2)
+  let tipX = item.tipX === undefined ? null : (item.tipX / 100) * width
+  let tipY = item.tipY === undefined ? null : (item.tipY / 100) * height
+  if (tipX === null || tipY === null) {
+    const reach = 0.45 * pxPerIn
+    const dx = width / 2 - cx
+    const dy = height / 2 - cy
+    const mag = Math.hypot(dx, dy) || 1
+    tipX = cx + (dx / mag) * reach
+    tipY = cy + (dy / mag) * reach
+  }
+  tipX = clamp(tipX, 0, width, cx)
+  tipY = clamp(tipY, 0, height, cy)
+  const dx = tipX - cx
+  const dy = tipY - cy
+  const length = Math.hypot(dx, dy) || 1
+  const showLeader = length > radius + 4
+  const edgeX = cx + (dx / length) * radius
+  const edgeY = cy + (dy / length) * radius
+  const leaderPt = Math.min(1.75, 0.9 + Number(item.stroke || stroke || DEFAULT_STROKE) * 0.45)
+  const leaderWidth = (leaderPt / 72) * pxPerIn
+  return {
+    x: cx,
+    y: cy,
+    radius,
+    tipX,
+    tipY,
+    edgeX,
+    edgeY,
+    showLeader,
+    leaderWidth,
+    head: 0.09 * pxPerIn,
+    numberSize: Math.min((8.5 / 72) * pxPerIn, radius * 0.95),
+    label: null,
+    stroke,
+  }
 }
 
 // Turn a legacy circle into a normal ellipse once the photo size is known.
@@ -178,22 +351,29 @@ export function geometry(item, imageWidth, imageHeight) {
   if (item.type === 'text') {
     return { x, y, fontSize: Math.max(12, ((item.fontSize || 2.4) / 100) * imageWidth), stroke }
   }
-  const radius = ((item.size || 2.4) / 100) * imageWidth
-  return { x, y, radius: Math.max(12, radius), stroke }
+  return calloutLayout(item, imageWidth, imageHeight, stroke)
 }
 
-export function createPlacedAnnotation(type, point, items, style) {
+export function createPlacedAnnotation(type, point, items, style, extra = {}) {
   const base = {
     id: crypto.randomUUID(),
     type,
     x: point.x,
     y: point.y,
-    text: type === 'text' ? 'Label' : '',
+    text: type === 'text' ? 'Text' : String(extra.text || ''),
     color: style.color,
     stroke: style.stroke,
   }
   if (type === 'callout') {
-    return normalizeAnnotation({ ...base, number: nextCalloutNumber(items), size: 2.4 })
+    return normalizeAnnotation({
+      ...base,
+      color: style.color || CALLOUT_BLUE,
+      number: extra.number || nextCalloutNumber(items),
+      size: 3.2,
+      bomLineId: extra.bomLineId || '',
+      tipX: extra.tipX,
+      tipY: extra.tipY,
+    })
   }
   if (type === 'text') return normalizeAnnotation({ ...base, fontSize: 2.4 })
   return null
@@ -234,14 +414,12 @@ export function annotationFromDrag(draft) {
   })
 }
 
-// The photo sits on a blank sheet. Marks may sit on that sheet, past the photo edges.
-const SHEET_PAD = 22
-
+// The printed picture is the photo. The frame grows only when a mark sits outside it.
 export function contentFrame(items, aspect = 1) {
-  let minX = -SHEET_PAD
-  let minY = -SHEET_PAD
-  let maxX = 100 + SHEET_PAD
-  let maxY = 100 + SHEET_PAD
+  let minX = 0
+  let minY = 0
+  let maxX = 100
+  let maxY = 100
   const add = (x, y) => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return
     minX = Math.min(minX, x)
@@ -265,17 +443,14 @@ export function contentFrame(items, aspect = 1) {
       add(item.x + Math.min(60, label.length * font * 0.55), item.y + font * aspect + 4)
     }
     if (item.type === 'callout') {
-      const pad = item.size || 2.4
-      const extra = item.text.trim() ? Math.min(46, item.text.trim().length * 1.6) : 0
-      add(item.x - pad, item.y - pad * aspect)
-      add(item.x + pad + extra, item.y + pad * aspect)
+      if (item.tipX !== undefined) add(item.tipX, item.tipY)
     }
   }
   return {
-    minX: Math.max(-200, minX - 4),
-    minY: Math.max(-200, minY - 4),
-    maxX: Math.min(300, maxX + 4),
-    maxY: Math.min(300, maxY + 4),
+    minX: Math.max(-200, minX < 0 ? minX - 2 : 0),
+    minY: Math.max(-200, minY < 0 ? minY - 2 : 0),
+    maxX: Math.min(300, maxX > 100 ? maxX + 2 : 100),
+    maxY: Math.min(300, maxY > 100 ? maxY + 2 : 100),
   }
 }
 
@@ -301,6 +476,8 @@ export function remapAnnotations(items, crop) {
       if (item.r !== undefined) next.r = item.r * scaleX
       if (item.fontSize !== undefined) next.fontSize = item.fontSize * scaleX
       if (item.size !== undefined) next.size = item.size * scaleX
+      if (item.tipX !== undefined) next.tipX = (item.tipX - crop.x) * scaleX
+      if (item.tipY !== undefined) next.tipY = (item.tipY - crop.y) * scaleY
       return next
     }),
   )

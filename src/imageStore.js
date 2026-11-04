@@ -1,6 +1,9 @@
-// Photo files are stored in IndexedDB, a file drawer built into the browser.
-// The work instruction itself stays in localStorage and only remembers each photo's id.
+// The desktop app stores photo files in the WKI Data folder.
+// A browser visit stores them in IndexedDB.
+// The work instruction only remembers each photo's id.
 // Removing a photo from a step does not delete the file, so an unsaved edit cannot erase it.
+
+import { usesFileStore } from './storage.js'
 
 const DB_NAME = 'wki-builder-images'
 const STORE = 'images'
@@ -29,6 +32,15 @@ function finishTransaction(transaction) {
 }
 
 export async function putImage(id, blob) {
+  if (usesFileStore()) {
+    const response = await fetch(`/api/images/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+      body: blob,
+    })
+    if (!response.ok) throw new Error('Could not store the photo in the WKI data folder.')
+    return
+  }
   const db = await openDb()
   try {
     const transaction = db.transaction(STORE, 'readwrite')
@@ -41,6 +53,12 @@ export async function putImage(id, blob) {
 }
 
 export async function listImageIds() {
+  if (usesFileStore()) {
+    const response = await fetch('/api/images')
+    if (!response.ok) throw new Error('Could not list the photos.')
+    const payload = await response.json()
+    return (payload.ids || []).map((id) => String(id))
+  }
   const db = await openDb()
   try {
     const transaction = db.transaction(STORE, 'readonly')
@@ -58,6 +76,12 @@ export async function listImageIds() {
 }
 
 export async function getImage(id) {
+  if (usesFileStore()) {
+    const response = await fetch(`/api/images/${encodeURIComponent(id)}`)
+    if (response.status === 404) return null
+    if (!response.ok) throw new Error('Could not read the photo.')
+    return response.blob()
+  }
   const db = await openDb()
   try {
     const transaction = db.transaction(STORE, 'readonly')

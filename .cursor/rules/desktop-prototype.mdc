@@ -1,0 +1,23 @@
+---
+description: Ship every WKI Builder change into the desktop prototype
+alwaysApply: true
+---
+
+# Desktop prototype
+
+The user runs WKI Builder from the desktop app. After any change to app behavior, layout, or data handling, rebuild that prototype before the task is done.
+
+- Shortcut: the Desktop `WKI Builder` shortcut
+- Program: `Desktop\WKI\App\win-unpacked\WKI Builder.exe`
+- Data stays in `Desktop\WKI\Data` (work orders, images, backups). Do not move or wipe it during a rebuild.
+
+Rebuild from the project folder:
+
+```powershell
+$env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+npm run pack
+```
+
+If the pack fails because the program files are locked, the desktop app is open. Close it, then pack again. Confirm the shortcut still opens `Desktop\WKI\App\win-unpacked\WKI Builder.exe`.
+
+Do not treat the Vite dev server as the delivered app.

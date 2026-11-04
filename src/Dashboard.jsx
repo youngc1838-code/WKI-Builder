@@ -100,14 +100,21 @@ function Dashboard({ documents, onOpen, onCreate, onDelete }) {
               {visible.map((doc) => (
                 <tr key={doc.id}>
                   <td>
-                    <div className="doc-number">
-                      {doc.documentNumber || 'No number'} · Rev {doc.revision || '—'}
-                    </div>
-                    <div className="doc-title">
-                      {doc.title || 'Untitled'}
-                      {doc.isSample ? <span className="sample-tag">Sample</span> : null}
-                    </div>
-                    {doc.partNumber ? <div className="doc-part">{doc.partNumber}</div> : null}
+                    <button
+                      type="button"
+                      className="doc-open"
+                      aria-label={`Open ${doc.documentNumber || 'untitled document'} ${doc.title || 'untitled'}`}
+                      onClick={() => onOpen(doc)}
+                    >
+                      <span className="doc-number">
+                        {doc.documentNumber || 'No number'} · Rev {doc.revision || '—'}
+                      </span>
+                      <span className="doc-title">
+                        {doc.title || 'Untitled'}
+                        {doc.isSample ? <span className="sample-tag">Sample</span> : null}
+                      </span>
+                      {doc.partNumber ? <span className="doc-part">{doc.partNumber}</span> : null}
+                    </button>
                   </td>
                   <td>{doc.documentType}</td>
                   <td>{doc.department || '—'}</td>
@@ -117,14 +124,6 @@ function Dashboard({ documents, onOpen, onCreate, onDelete }) {
                   <td>{formatWhen(doc.updatedAt)}</td>
                   <td>
                     <div className="row-actions">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        aria-label={`Open ${doc.documentNumber} ${doc.title}`}
-                        onClick={() => onOpen(doc)}
-                      >
-                        Open
-                      </button>
                       {doc.status === 'Draft' ? (
                         <button type="button" className="btn btn-danger" onClick={() => onDelete(doc)}>
                           Delete

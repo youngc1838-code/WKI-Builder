@@ -87,7 +87,7 @@ function addShape(layer, item, width, height) {
       y: box.y + 6,
       text: label,
       fontSize,
-      fontStyle: 'bold',
+      fontStyle: 'normal',
       fontFamily: 'Segoe UI, sans-serif',
       fill: '#1b2430',
     })
@@ -106,39 +106,48 @@ function addShape(layer, item, width, height) {
     layer.add(text)
     return
   }
+  if (box.showLeader) {
+    const halo = box.leaderWidth + Math.max(1.5, box.leaderWidth * 0.7)
+    layer.add(
+      new Konva.Arrow({
+        points: [box.edgeX, box.edgeY, box.tipX, box.tipY],
+        stroke: '#ffffff',
+        fill: '#ffffff',
+        strokeWidth: halo,
+        pointerLength: box.head + 1,
+        pointerWidth: box.head + 1,
+        lineCap: 'round',
+      }),
+    )
+    layer.add(
+      new Konva.Arrow({
+        points: [box.edgeX, box.edgeY, box.tipX, box.tipY],
+        stroke: color,
+        fill: color,
+        strokeWidth: box.leaderWidth,
+        pointerLength: box.head,
+        pointerWidth: box.head,
+        lineCap: 'round',
+      }),
+    )
+  }
   const group = new Konva.Group({ x: box.x, y: box.y })
-  group.add(new Konva.Circle({ radius: box.radius, fill: color, stroke: '#ffffff', strokeWidth: 3 }))
+  group.add(new Konva.Circle({ radius: box.radius, fill: color, stroke: '#ffffff', strokeWidth: Math.max(1.5, box.leaderWidth) }))
   group.add(
     new Konva.Text({
       text: String(item.number || ''),
-      fontSize: Math.max(12, box.radius),
+      fontSize: box.numberSize,
       fontStyle: 'bold',
       fontFamily: 'Segoe UI, sans-serif',
       fill: '#ffffff',
       width: box.radius * 2,
+      height: box.radius * 2,
       offsetX: box.radius,
-      offsetY: Math.max(12, box.radius) / 2,
+      offsetY: box.radius,
       align: 'center',
+      verticalAlign: 'middle',
     }),
   )
-  const note = item.text.trim()
-  if (note) {
-    const noteSize = Math.max(14, box.radius * 0.85)
-    group.add(
-      new Konva.Text({
-        x: box.radius + 8,
-        y: -noteSize / 2,
-        text: note,
-        fontSize: noteSize,
-        fontStyle: 'bold',
-        fontFamily: 'Segoe UI, sans-serif',
-        fill: '#1b2430',
-        stroke: '#ffffff',
-        strokeWidth: 4,
-        fillAfterStrokeEnabled: true,
-      }),
-    )
-  }
   layer.add(group)
 }
 

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Dashboard from './Dashboard.jsx'
 import Editor from './Editor.jsx'
+import Settings from './Settings.jsx'
 import { AUTO_BACKUP_MS, LATEST_BACKUP_NAME, createBackupBlob, downloadBlob, readBackupFile, restoreBackup } from './backup.js'
 import { allowStoredFolder, chooseBackupFolder, loadStoredFolder, writeLatestBackup } from './backupFolder.js'
 import { createBlankDocument, createRevisionFrom } from './model.js'
-import { loadDocumentStore, saveDocuments } from './storage.js'
+import { fileStoreDataDir, loadDocumentStore, saveDocuments } from './storage.js'
 
 // Two screens share one list of documents.
 // activeDocument is null on the list. It holds a copy while editing.
@@ -19,6 +20,7 @@ function App() {
   const [loadWarning] = useState(store.warning)
   const [saveError, setSaveError] = useState('')
   const [activeDocument, setActiveDocument] = useState(null)
+  const [showSettings, setShowSettings] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [folderPermission, setFolderPermission] = useState('missing')
   const [backupNote, setBackupNote] = useState('')
@@ -111,6 +113,38 @@ function App() {
       draftNote = ' The open document could not be saved in this browser.'
     }
 
+    if (store.fileStore) {
+      const signature = JSON.stringify(documentsRef.current)
+      if (!force && signature === lastCopyRef.current) return
+      setBackupWorking(true)
+      try {
+        const { blob, documentCount, imageCount } = await createBackupBlob(documentsRef.current)
+        const response = await fetch('/api/backups/wki-backup-latest.zip', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/zip' },
+          body: blob,
+        })
+        if (!response.ok) throw new Error('Could not write the backup zip.')
+        lastCopyRef.current = signature
+        const when = new Intl.DateTimeFormat(undefined, {
+          hour: 'numeric',
+          minute: '2-digit',
+        }).format(new Date())
+        backupStatus(
+          `Copied ${documentCount} documents and ${imageCount} photos into the backups folder at ${when}.${draftNote}`,
+          false,
+        )
+      } catch (error) {
+        backupStatus(
+          `${error?.message || 'Could not update the backup file.'} The saved work orders were left in place. The next try is in 5 minutes.`,
+          true,
+        )
+      } finally {
+        setBackupWorking(false)
+      }
+      return
+    }
+
     const handle = folderHandleRef.current
     if (!handle || folderPermissionRef.current !== 'granted') {
       if (flush?.ok && !flush.skipped) {
@@ -152,7 +186,13 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    loadStoredFolder()
+    if (store.fileStore) {
+      backupStatus(
+        `Work orders are saved in ${store.dataDir || fileStoreDataDir()}. A zip copy is written to the backups folder every 5 minutes.`,
+        false,
+      )
+      copyToFolderRef.current(true)
+    } else loadStoredFolder()
       .then((stored) => {
         if (cancelled || !stored) return
         folderHandleRef.current = stored.handle
@@ -262,6 +302,27 @@ function App() {
     }
   }
 
+  function leaveOpenDocument() {
+    if (!activeDocument) return true
+    const flush = flushOpenDraft()
+    if (flush?.ok === false) {
+      return window.confirm('This document has changes that were not saved. Leave it?')
+    }
+    return true
+  }
+
+  function goToDocuments() {
+    if (!leaveOpenDocument()) return
+    setActiveDocument(null)
+    setShowSettings(false)
+  }
+
+  function goToSettings() {
+    if (!leaveOpenDocument()) return
+    setActiveDocument(null)
+    setShowSettings(true)
+  }
+
   function deleteDraft(doc) {
     if (doc.status !== 'Draft') return false
     const name = doc.documentNumber || doc.title || 'this draft'
@@ -284,27 +345,32 @@ function App() {
           <p className="eyebrow">Manufacturing documents</p>
           <h1>WKI Builder</h1>
         </div>
-        <p className="header-note">Browser prototype</p>
+        <nav className="header-nav" aria-label="Main">
+          <button type="button" className={showSettings ? '' : 'is-current'} onClick={goToDocuments}>
+            Documents
+          </button>
+          <button type="button" className={showSettings ? 'is-current' : ''} onClick={goToSettings}>
+            Settings
+          </button>
+        </nav>
       </header>
-      <p className="banner">
-        Prototype only. Documents are saved in this browser’s local storage. Photos are stored
-        beside them in this browser. Setting a status does not approve a document, and this app
-        does not limit who can open or edit it.
-      </p>
       {loadWarning ? <p className="banner banner-warning">{loadWarning}</p> : null}
       {saveError ? <p className="banner banner-warning">{saveError}</p> : null}
-      <BackupBar
-        note={backupNote}
-        isError={backupError}
-        working={backupWorking}
-        folderName={folderName}
-        needsPermission={folderPermission === 'prompt' || folderPermission === 'denied'}
-        onChooseFolder={pickBackupFolder}
-        onDownload={downloadBackup}
-        onLoad={loadBackup}
-      />
       <main className="page">
-        {activeDocument ? (
+        {showSettings ? (
+          <Settings
+            dataDir={store.dataDir || fileStoreDataDir()}
+            fileStore={store.fileStore}
+            note={backupNote}
+            isError={backupError}
+            working={backupWorking}
+            folderName={folderName}
+            needsPermission={folderPermission === 'prompt' || folderPermission === 'denied'}
+            onChooseFolder={pickBackupFolder}
+            onDownload={downloadBackup}
+            onLoad={loadBackup}
+          />
+        ) : activeDocument ? (
           <Editor
             key={activeDocument.id}
             initialDocument={activeDocument}
@@ -324,46 +390,6 @@ function App() {
           />
         )}
       </main>
-    </div>
-  )
-}
-
-function BackupBar({ note, isError, working, folderName, needsPermission, onChooseFolder, onDownload, onLoad }) {
-  const fileRef = useRef(null)
-  const folderLabel = needsPermission
-    ? 'Allow backup folder'
-    : folderName
-      ? 'Change backup folder'
-      : 'Choose backup folder'
-
-  return (
-    <div className="backup-bar">
-      <p className={note ? `backup-note ${isError ? 'is-error' : 'is-done'}` : 'backup-note'}>
-        {note ||
-          'Choose a backup folder in OneDrive. The app then saves and copies your work there every 5 minutes. Load backup brings a saved zip back into this browser.'}
-      </p>
-      <div className="backup-actions">
-        <button type="button" className="btn btn-secondary" onClick={onChooseFolder} disabled={working}>
-          {folderLabel}
-        </button>
-        <button type="button" className="btn btn-secondary" onClick={() => fileRef.current?.click()} disabled={working}>
-          Load backup
-        </button>
-        <button type="button" className="btn btn-secondary" onClick={onDownload} disabled={working}>
-          {working ? 'Working…' : 'Download backup'}
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".zip,application/zip"
-          hidden
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            event.target.value = ''
-            if (file) onLoad(file)
-          }}
-        />
-      </div>
     </div>
   )
 }

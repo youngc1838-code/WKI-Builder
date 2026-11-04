@@ -1,5 +1,23 @@
 import { AnnotationPreview } from './ImageEditor.jsx'
 
+function imageFilesFromClipboard(data) {
+  const files = []
+  for (const item of data?.items ? [...data.items] : []) {
+    if (item.kind === 'file' && String(item.type || '').startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) files.push(file)
+    }
+  }
+  if (files.length) return files
+  return [...(data?.files || [])].filter((file) => String(file.type || '').startsWith('image/'))
+}
+
+function pasteTargetIsText(target) {
+  if (!target) return false
+  const name = target.tagName
+  return name === 'INPUT' || name === 'TEXTAREA' || name === 'SELECT' || target.isContentEditable
+}
+
 function ImageGallery({
   label,
   hint,
@@ -16,8 +34,20 @@ function ImageGallery({
 }) {
   const photos = images || []
 
+  function handlePaste(event) {
+    if (locked || pasteTargetIsText(event.target)) return
+    const files = imageFilesFromClipboard(event.clipboardData)
+    if (!files.length) return
+    event.preventDefault()
+    onAddFiles(files)
+  }
+
   return (
-    <div className="image-block">
+    <div
+      className="image-block"
+      tabIndex={locked ? undefined : 0}
+      onPaste={handlePaste}
+    >
       <div className="image-block-heading">
         <strong>{label}</strong>
         {locked ? null : (
@@ -36,8 +66,11 @@ function ImageGallery({
         )}
       </div>
       {hint ? <p className="field-hint">{hint}</p> : null}
+      {locked ? null : (
+        <p className="field-hint">Click this section, then paste an image.</p>
+      )}
       {photos.length === 0 ? (
-        <p className="image-empty">No photos yet.</p>
+        <p className="image-empty">No photos yet. Use Add images, or click here and paste.</p>
       ) : (
         <div className="image-list">
           {photos.map((image) => (
@@ -63,7 +96,7 @@ function ImageGallery({
               )}
               {imageUrls[image.id] && !locked ? (
                 <button type="button" className="btn btn-secondary" onClick={() => onEdit(image.attachmentId)}>
-                  Edit annotations
+                  Add balloons
                 </button>
               ) : null}
               {imageUrls[image.id] && !locked ? (
@@ -77,7 +110,8 @@ function ImageGallery({
                     .filter((item) => item.type === 'callout')
                     .map((item) => (
                       <li key={item.id}>
-                        <strong>{item.number}.</strong> {item.text.trim() || 'No description yet'}
+                        <strong>{item.number}.</strong>
+                        {item.text.trim() ? ` ${item.text.trim()}` : ''}
                       </li>
                     ))}
                 </ol>

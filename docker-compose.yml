@@ -1,0 +1,7 @@
+services:
+  wki:
+    build: .
+    ports:
+      - "4173:4173"
+    volumes:
+      - ../WKI/Data:/data

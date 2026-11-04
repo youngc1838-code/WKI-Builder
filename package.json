@@ -3,11 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "electron/main.mjs",
+  "author": "Cobra Aero",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop": "electron electron/main.mjs",
+    "pack": "vite build && electron-builder --win dir"
   },
   "dependencies": {
     "konva": "^10.8.0",
@@ -19,7 +23,32 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^45.2.2",
+    "electron-builder": "^26.18.0",
     "oxlint": "^1.81.0",
     "vite": "^8.3.0"
+  },
+  "build": {
+    "appId": "com.cobra-aero.wki-builder",
+    "productName": "WKI Builder",
+    "asar": true,
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist"
+      }
+    ],
+    "directories": {
+      "output": "../WKI/App"
+    },
+    "win": {
+      "target": "dir",
+      "signAndEditExecutable": false
+    }
   }
 }
