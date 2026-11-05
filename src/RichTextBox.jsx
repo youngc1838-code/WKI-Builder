@@ -98,7 +98,7 @@ function clearUnwantedBold(root) {
   }
 }
 
-function RichTextBox({ value, onChange, readOnly, placeholder, invalid, labelledBy }) {
+function RichTextBox({ value, onChange, readOnly, placeholder, invalid, labelledBy, parts, tools }) {
   const editorRef = useRef(null)
   const [active, setActive] = useState({})
 
@@ -122,6 +122,15 @@ function RichTextBox({ value, onChange, readOnly, placeholder, invalid, labelled
     if (!node || !onChange) return
     const html = sanitizeHtml(node.innerHTML)
     onChange(plainText(html) ? html : '')
+  }
+
+  function insertReference(attribute, className, id, number) {
+    const root = editorRef.current
+    if (!root || !id) return
+    root.focus()
+    const html = `<span ${attribute}="${id}" class="${className}" contenteditable="false">${number}</span>&nbsp;`
+    document.execCommand('insertHTML', false, html)
+    emit()
   }
 
   function format(command) {
@@ -192,6 +201,46 @@ function RichTextBox({ value, onChange, readOnly, placeholder, invalid, labelled
     <div className={invalid ? 'rich-field invalid' : 'rich-field'}>
       {readOnly ? null : (
         <div className="rich-toolbar" role="toolbar" aria-label="Text formatting">
+          {(parts || []).length ? (
+            <select
+              className="rich-insert"
+              aria-label="Insert part number"
+              value=""
+              onChange={(event) => {
+                const line = (parts || []).find((item) => item.id === event.target.value)
+                event.target.value = ''
+                if (!line) return
+                insertReference('data-bom-line', 'part-ref', line.id, line.balloon)
+              }}
+            >
+              <option value="">Insert part</option>
+              {(parts || []).map((line) => (
+                <option key={line.id} value={line.id}>
+                  {line.balloon}. {line.partNumber || 'Part'}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {(tools || []).length ? (
+            <select
+              className="rich-insert"
+              aria-label="Insert tool number"
+              value=""
+              onChange={(event) => {
+                const tool = (tools || []).find((item) => item.id === event.target.value)
+                event.target.value = ''
+                if (!tool) return
+                insertReference('data-tool', 'tool-ref', tool.id, tool.balloon)
+              }}
+            >
+              <option value="">Insert tool</option>
+              {(tools || []).map((tool) => (
+                <option key={tool.id} value={tool.id}>
+                  {tool.balloon}. {tool.identifier || 'Tool'}
+                </option>
+              ))}
+            </select>
+          ) : null}
           {COMMANDS.map((item) => (
             <button
               key={item.command}

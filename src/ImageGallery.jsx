@@ -31,6 +31,7 @@ function ImageGallery({
   onRemove,
   onCaption,
   onContextMenu,
+  showCalloutIndex = true,
 }) {
   const photos = images || []
 
@@ -104,7 +105,7 @@ function ImageGallery({
                   Trim photo
                 </button>
               ) : null}
-              {(image.annotations || []).some((item) => item.type === 'callout') ? (
+              {showCalloutIndex && (image.annotations || []).some((item) => item.type === 'callout') ? (
                 <ol className="callout-index">
                   {(image.annotations || [])
                     .filter((item) => item.type === 'callout')

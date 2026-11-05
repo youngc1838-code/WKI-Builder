@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { parseDbaBom } from './bomImport.js'
 import { capitalizeSentences } from './textCase.js'
-import { assignBalloons, createBomLine } from './model.js'
 
 function moveItem(list, from, to) {
   if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return list
@@ -11,8 +10,8 @@ function moveItem(list, from, to) {
   return next
 }
 
-export function Balloon({ number }) {
-  return <span className="balloon">{number}</span>
+export function Balloon({ number, tone }) {
+  return <span className={tone === 'tool' ? 'balloon balloon-tool' : 'balloon'}>{number}</span>
 }
 
 export function BomList({
@@ -25,6 +24,8 @@ export function BomList({
   onDelete,
   onEditQuantity,
   onQuantityDone,
+  onImport,
+  onRenumber,
 }) {
   const fileRef = useRef(null)
   const dragFrom = useRef(null)
@@ -61,7 +62,7 @@ export function BomList({
         lines.length === 0 ||
         window.confirm(`Replace the current bill of materials with ${parsed.length} parts from ${file.name}?`)
       if (!replace) return
-      onChange(assignBalloons(parsed.map((line) => createBomLine(line))))
+      onImport(parsed)
     }
     reader.readAsText(file)
   }
@@ -77,6 +78,9 @@ export function BomList({
             </button>
             <button type="button" className="btn btn-secondary" onClick={onAdd}>
               Add part
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={onRenumber} disabled={lines.length === 0}>
+              Renumber
             </button>
             <button type="button" className="btn btn-danger" onClick={onDelete} disabled={lines.length === 0}>
               Delete BOM
@@ -95,18 +99,19 @@ export function BomList({
         )}
       </div>
       <p className="tool-list-note">
-        Export BOM components from DBA as CSV, then import them here. Each part gets a balloon
-        number, and that number stays with the part. Adding, removing, changing a quantity, or
-        deleting the whole list asks for the passcode. Parts stay off each step until you add them there. To mark a
-        picture, right-click it and choose Add balloons, pick the part, then click that part in
-        the photo. The balloon shows only that number. Use Text on the photo for words.
+        Export BOM components from DBA as CSV, then import them here. The list shows the
+        component ID, description, and quantity. Importing again keeps the balloon for a part
+        that matches the component ID, the description, or the old line number. Renumber puts
+        the balloons back in order after a part is added or removed. Adding, removing, changing
+        a quantity, renumbering, or deleting the whole list asks for the passcode. In a step,
+        use Insert part to place a number that follows the bill of materials.
       </p>
       {lines.length === 0 ? <p className="tool-empty">No parts yet.</p> : null}
       {lines.length ? (
         <div className="bom-columns" aria-hidden="true">
           <span />
-          <span>No.</span>
-          <span>Part</span>
+          <span />
+          <span>Component ID</span>
           <span>Description</span>
           <span>Qty</span>
           <span />
@@ -147,8 +152,8 @@ export function BomList({
           <input
             value={line.partNumber}
             readOnly={locked}
-            aria-label={`Part number ${index + 1}`}
-            placeholder="Part number"
+            aria-label={`Component ID ${index + 1}`}
+            placeholder="Component ID"
             spellCheck={false}
             onChange={(event) => update(line.id, { partNumber: event.target.value })}
           />
