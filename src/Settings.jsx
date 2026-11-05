@@ -67,7 +67,7 @@ function Settings({
         <h3>Document status</h3>
         <p className="section-note">
           Changing a document to Draft, In Review, Released, or Obsolete asks for a passcode.
-          Adding, removing, changing a quantity, or deleting the whole bill of materials asks for the same passcode.
+          Adding, removing, changing a quantity, renumbering, or deleting the whole bill of materials asks for the same passcode.
           The passcode is not shown here and is not stored on the document. Setting a status
           still does not approve the document.
         </p>

@@ -2,7 +2,8 @@
 // revising, and checking required fields. No network and no database.
 
 import { annotationsFromImage, normalizeAnnotations, roundAnnotation } from './annotations.js'
-import { plainText, sanitizeHtml } from './richText.js'
+import { CALLOUT_BLUE, TOOL_BALLOON } from './annotations.js'
+import { plainText, refreshReferenceHtml, remapReferenceHtml, sanitizeHtml } from './richText.js'
 
 export const DOCUMENT_TYPES = ['Work Instruction', 'SOP']
 
@@ -49,7 +50,7 @@ function savedImage(image) {
   return next
 }
 
-function copyImage(image, bomMap) {
+function copyImage(image, bomMap, toolMap) {
   const next = savedImage(image)
   if (!next) return null
   return {
@@ -57,8 +58,8 @@ function copyImage(image, bomMap) {
     attachmentId: crypto.randomUUID(),
     annotations: (next.annotations || []).map((item) => {
       const copy = { ...item, id: crypto.randomUUID() }
-      if (!copy.bomLineId || !bomMap) return copy
-      copy.bomLineId = bomMap.get(copy.bomLineId) || ''
+      if (copy.bomLineId && bomMap) copy.bomLineId = bomMap.get(copy.bomLineId) || ''
+      if (copy.toolId && toolMap) copy.toolId = toolMap.get(copy.toolId) || ''
       return copy
     }),
   }
@@ -90,6 +91,7 @@ function normalizeTool(raw) {
     kind: TOOL_KINDS.includes(raw.kind) ? raw.kind : 'Tool',
     identifier: String(raw.identifier || ''),
     description: String(raw.description || ''),
+    balloon: storedBalloon(raw.balloon),
   }
 }
 
@@ -145,26 +147,39 @@ export function nextBalloonNumber(lines) {
   return numbers.length ? Math.max(...numbers) + 1 : 1
 }
 
-function tieBalloonImages(images, byId) {
+export function assignToolBalloons(tools) {
+  return assignBalloons(tools || [])
+}
+
+function tieBalloonImages(images, partsById, toolsById) {
   return (images || []).map((image) => {
     if (!image) return image
     return {
       ...image,
       annotations: (image.annotations || []).map((item) => {
-        if (item.type !== 'callout' || !item.bomLineId) return item
-        const line = byId.get(item.bomLineId)
-        if (!line) return item
-        return { ...item, number: line.balloon, text: '' }
+        if (item.type !== 'callout') return item
+        if (item.bomLineId) {
+          const line = partsById.get(item.bomLineId)
+          if (!line) return item
+          return { ...item, number: line.balloon, text: '', color: CALLOUT_BLUE }
+        }
+        if (item.toolId) {
+          const tool = toolsById.get(item.toolId)
+          if (!tool) return item
+          return { ...item, number: tool.balloon, text: '', color: TOOL_BALLOON }
+        }
+        return item
       }),
     }
   })
 }
 
 function tieDocumentBalloons(doc) {
-  const byId = new Map((doc.bomLines || []).map((line) => [line.id, line]))
-  const coverImages = tieBalloonImages(doc.coverImages, byId)
-  const completedImages = tieBalloonImages(doc.completedImages, byId)
-  const bomImages = tieBalloonImages(doc.bomImages, byId)
+  const partsById = new Map((doc.bomLines || []).map((line) => [line.id, line]))
+  const toolsById = new Map((doc.equipment || []).map((tool) => [tool.id, tool]))
+  const coverImages = tieBalloonImages(doc.coverImages, partsById, toolsById)
+  const completedImages = tieBalloonImages(doc.completedImages, partsById, toolsById)
+  const bomImages = tieBalloonImages(doc.bomImages, partsById, toolsById)
   return {
     ...doc,
     coverImages,
@@ -174,9 +189,118 @@ function tieDocumentBalloons(doc) {
     completedImage: completedImages[0] || doc.completedImage || null,
     steps: (doc.steps || []).map((step) => ({
       ...step,
-      images: tieBalloonImages(step.images, byId),
+      images: tieBalloonImages(step.images, partsById, toolsById),
     })),
   }
+}
+
+function sameKey(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+export function mergeImportedBom(existing, parsed) {
+  const pool = (existing || []).map((line) => ({ ...line, used: false }))
+  function take(match) {
+    if (!match || match.used) return null
+    match.used = true
+    return match
+  }
+  const lines = (parsed || []).map((row) => {
+    const partKey = sameKey(row.partNumber)
+    let match = partKey
+      ? take(pool.find((line) => !line.used && sameKey(line.partNumber) === partKey))
+      : null
+    if (!match && row.description) {
+      const description = sameKey(row.description)
+      const candidates = pool.filter((line) => !line.used && sameKey(line.description) === description)
+      if (candidates.length === 1) match = take(candidates[0])
+    }
+    if (!match && row.lineNo) {
+      const lineKey = sameKey(row.lineNo)
+      match = take(
+        pool.find(
+          (line) => !line.used && (sameKey(line.lineNo) === lineKey || sameKey(line.partNumber) === lineKey),
+        ),
+      )
+    }
+    if (match) {
+      return {
+        ...match,
+        partNumber: row.partNumber || match.partNumber,
+        description: row.description,
+        quantity: row.quantity,
+        lineNo: row.lineNo,
+        sequence: row.sequence,
+        balloon: match.balloon,
+        id: match.id,
+      }
+    }
+    return createBomLine(row)
+  })
+  return assignBalloons(lines)
+}
+
+export function toolsForStep(step, equipment) {
+  if (Array.isArray(step?.toolIds)) {
+    const byId = new Map((equipment || []).map((tool) => [tool.id, tool]))
+    return step.toolIds.map((id) => byId.get(id)).filter(Boolean)
+  }
+  return step?.tools || []
+}
+
+function referenceLookups(doc) {
+  return {
+    parts: new Map((doc.bomLines || []).map((line) => [line.id, line])),
+    tools: new Map((doc.equipment || []).map((tool) => [tool.id, tool])),
+  }
+}
+
+export function refreshDocumentReferences(doc) {
+  const { parts, tools } = referenceLookups(doc)
+  const keepPart = (id) => parts.has(id)
+  function keepMark(item) {
+    if (item.type !== 'callout') return true
+    if (item.bomLineId && !keepPart(item.bomLineId)) return false
+    if (item.toolId && !tools.has(item.toolId)) return false
+    return true
+  }
+  const next = {
+    ...doc,
+    steps: (doc.steps || []).map((step) => ({
+      ...step,
+      instruction: refreshReferenceHtml(step.instruction, parts, tools),
+      qualityCheck: refreshReferenceHtml(step.qualityCheck, parts, tools),
+      bomLineIds: (step.bomLineIds || []).filter(keepPart),
+      toolIds: Array.isArray(step.toolIds) ? step.toolIds.filter((id) => tools.has(id)) : step.toolIds,
+      images: (step.images || []).map((image) => ({
+        ...image,
+        annotations: (image.annotations || []).filter(keepMark),
+      })),
+    })),
+    coverImages: (doc.coverImages || []).map((image) => ({
+      ...image,
+      annotations: (image.annotations || []).filter(keepMark),
+    })),
+    completedImages: (doc.completedImages || []).map((image) => ({
+      ...image,
+      annotations: (image.annotations || []).filter(keepMark),
+    })),
+  }
+  return tieDocumentBalloons(next)
+}
+
+export function applyImportedBom(doc, parsed) {
+  return refreshDocumentReferences({
+    ...doc,
+    bomLines: mergeImportedBom(doc.bomLines || [], parsed),
+  })
+}
+
+export function renumberDocumentBom(doc) {
+  return refreshDocumentReferences({
+    ...doc,
+    bomLines: (doc.bomLines || []).map((line, index) => ({ ...line, balloon: index + 1 })),
+  })
 }
 
 function savedBomLine(line) {
@@ -203,6 +327,7 @@ function normalizeStep(raw, index) {
     title: String(source.title || ''),
     instruction: String(source.instruction || ''),
     tools,
+    ...(Array.isArray(source.toolIds) ? { toolIds: source.toolIds.map(String) } : {}),
     bomLineIds: Array.isArray(source.bomLineIds) ? source.bomLineIds.map(String) : [],
     toolsOrParts: String(source.toolsOrParts || ''),
     qualityCheck: String(source.qualityCheck || ''),
@@ -221,7 +346,7 @@ export function createBomLine(fields = {}) {
 }
 
 export function createStep() {
-  return normalizeStep({ id: crypto.randomUUID(), tools: [createToolItem()] }, 0)
+  return normalizeStep({ id: crypto.randomUUID(), tools: [], toolIds: [] }, 0)
 }
 
 // Rebuild a document so older or incomplete saved data still has every field.
@@ -253,9 +378,9 @@ export function normalizeDocument(raw) {
     safety: String(source.safety || ''),
     toolsMaterials: String(source.toolsMaterials || ''),
     toolsEquipment,
-    equipment: Array.isArray(source.equipment)
-      ? source.equipment.map(normalizeTool).filter(Boolean)
-      : [],
+    equipment: assignToolBalloons(
+      Array.isArray(source.equipment) ? source.equipment.map(normalizeTool).filter(Boolean) : [],
+    ),
     materialsParts: String(source.materialsParts || ''),
     references: String(source.references || ''),
     status,
@@ -379,14 +504,18 @@ export function prepareForSave(doc) {
     next[field] = storedText(doc[field], RICH_FIELDS.has(field))
   }
   next.effectiveDate = String(doc.effectiveDate ?? '').trim()
-  next.equipment = (doc.equipment || []).map(savedTool).filter(Boolean)
+  next.equipment = assignToolBalloons((doc.equipment || []).map(savedTool).filter(Boolean))
   next.bomLines = assignBalloons((doc.bomLines || []).map(savedBomLine).filter(Boolean))
   const bomIds = new Set(next.bomLines.map((line) => line.id))
+  const equipmentIds = new Set(next.equipment.map((tool) => tool.id))
   next.steps = (doc.steps || []).map((step) => ({
     ...step,
     title: String(step.title ?? '').trim(),
     instruction: storedText(step.instruction, true),
     tools: (step.tools || []).map(savedTool).filter(Boolean),
+    ...(Array.isArray(step.toolIds)
+      ? { toolIds: step.toolIds.map(String).filter((id) => equipmentIds.has(id)) }
+      : {}),
     bomLineIds: (step.bomLineIds || []).map(String).filter((id) => bomIds.has(id)),
     toolsOrParts: storedText(step.toolsOrParts, true),
     qualityCheck: storedText(step.qualityCheck, true),
@@ -399,7 +528,7 @@ export function prepareForSave(doc) {
   next.bomImages = savedImageList(doc.bomImages)
   next.coverImage = next.coverImages[0] || null
   next.completedImage = next.completedImages[0] || null
-  return tieDocumentBalloons(next)
+  return refreshDocumentReferences(next)
 }
 
 // A, B, C ... Z, then AA. Numbers such as 01 become 02.
@@ -424,6 +553,11 @@ export function createRevisionFrom(doc) {
     return { from: line.id, line: { ...line, id } }
   })
   const bomMap = new Map(bomLines.map((item) => [item.from, item.line.id]))
+  const equipment = (source.equipment || []).map((tool) => {
+    const id = crypto.randomUUID()
+    return { from: tool.id, tool: { ...tool, id } }
+  })
+  const toolMap = new Map(equipment.map((item) => [item.from, item.tool.id]))
   return normalizeDocument({
     ...source,
     id: crypto.randomUUID(),
@@ -433,19 +567,24 @@ export function createRevisionFrom(doc) {
     basedOnRevision: source.revision,
     effectiveDate: '',
     updatedAt: new Date().toISOString(),
-    coverImages: (source.coverImages || []).map((image) => copyImage(image, bomMap)).filter(Boolean),
-    completedImages: (source.completedImages || []).map((image) => copyImage(image, bomMap)).filter(Boolean),
-    bomImages: (source.bomImages || []).map((image) => copyImage(image, bomMap)).filter(Boolean),
+    coverImages: (source.coverImages || []).map((image) => copyImage(image, bomMap, toolMap)).filter(Boolean),
+    completedImages: (source.completedImages || []).map((image) => copyImage(image, bomMap, toolMap)).filter(Boolean),
+    bomImages: (source.bomImages || []).map((image) => copyImage(image, bomMap, toolMap)).filter(Boolean),
     coverImage: null,
     completedImage: null,
-    equipment: (source.equipment || []).map((tool) => ({ ...tool, id: crypto.randomUUID() })),
+    equipment: equipment.map((item) => item.tool),
     bomLines: bomLines.map((item) => item.line),
     steps: source.steps.map((step) => ({
       ...step,
       id: crypto.randomUUID(),
+      instruction: remapReferenceHtml(step.instruction, bomMap, toolMap),
+      qualityCheck: remapReferenceHtml(step.qualityCheck, bomMap, toolMap),
       tools: (step.tools || []).map((tool) => ({ ...tool, id: crypto.randomUUID() })),
+      ...(Array.isArray(step.toolIds)
+        ? { toolIds: step.toolIds.map((id) => toolMap.get(id)).filter(Boolean) }
+        : {}),
       bomLineIds: (step.bomLineIds || []).map((id) => bomMap.get(id)).filter(Boolean),
-      images: (step.images || []).map((image) => copyImage(image, bomMap)).filter(Boolean),
+      images: (step.images || []).map((image) => copyImage(image, bomMap, toolMap)).filter(Boolean),
     })),
   })
 }

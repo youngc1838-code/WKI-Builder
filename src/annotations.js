@@ -23,6 +23,7 @@ const DEFAULT_COLOR = '#8d2f2f'
 const DEFAULT_STROKE = 0.5
 // Balloons are sized for a photo printed on letter paper, not for the camera pixel size.
 export const CALLOUT_BLUE = '#0e4d7b'
+export const TOOL_BALLOON = '#c2410c'
 const LETTER_PHOTO_IN = { w: 7.4, h: 5.2 }
 const BALLOON_DIAMETER_IN = 0.28
 const LABEL_PT = 8
@@ -92,6 +93,7 @@ export function normalizeAnnotation(raw) {
     item.number = Number.isInteger(number) && number > 0 && number < 1000 ? number : 1
     item.size = clamp(raw.size, 1, 30, 3.2)
     item.bomLineId = raw.bomLineId ? String(raw.bomLineId) : ''
+    item.toolId = raw.toolId ? String(raw.toolId) : ''
     if (raw.tipX !== undefined && raw.tipX !== null && raw.tipX !== '') {
       item.tipX = clamp(raw.tipX, 0, 100, item.x)
       item.tipY = clamp(raw.tipY, 0, 100, item.y)
@@ -371,6 +373,7 @@ export function createPlacedAnnotation(type, point, items, style, extra = {}) {
       number: extra.number || nextCalloutNumber(items),
       size: 3.2,
       bomLineId: extra.bomLineId || '',
+      toolId: extra.toolId || '',
       tipX: extra.tipX,
       tipY: extra.tipY,
     })

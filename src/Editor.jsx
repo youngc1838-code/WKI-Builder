@@ -9,15 +9,19 @@ import { remapAnnotations } from './annotations.js'
 import PrintSheet, { editorContents } from './PrintSheet.jsx'
 import ImageGallery from './ImageGallery.jsx'
 import RichTextBox from './RichTextBox.jsx'
-import { BomList, StepBalloons } from './BomList.jsx'
+import { Balloon, BomList, StepBalloons } from './BomList.jsx'
 import { plainText } from './richText.js'
 import { capitalizeSentences } from './textCase.js'
 import { passcodeMatches } from './passcode.js'
 import {
   DOCUMENT_TYPES,
   TOOL_KINDS,
+  applyImportedBom,
+  assignToolBalloons,
   createBomLine,
   nextBalloonNumber,
+  refreshDocumentReferences,
+  renumberDocumentBom,
   createStep,
   createToolItem,
   formatWhen,
@@ -107,7 +111,11 @@ function ToolList({
               ↕
             </button>
           )}
-          <span className="tool-item-no">{index + 1}</span>
+          {tool.balloon ? (
+            <Balloon number={tool.balloon} tone="tool" />
+          ) : (
+            <span className="tool-item-no">{index + 1}</span>
+          )}
           <label>
             <span className="tool-field-label">Kind</span>
             <select
@@ -176,6 +184,76 @@ function ToolList({
           <RichTextBox value={legacy} readOnly={locked} onChange={onChangeLegacy} />
         </Field>
       ) : null}
+    </div>
+  )
+}
+
+function StepToolPicker({ equipment, selectedIds, locked, onChange }) {
+  const [choice, setChoice] = useState('')
+  const selected = new Set(selectedIds || [])
+  const added = (selectedIds || []).map((id) => equipment.find((tool) => tool.id === id)).filter(Boolean)
+  const available = equipment.filter((tool) => !selected.has(tool.id))
+
+  return (
+    <div className="tool-list">
+      <h4>Tools for this step</h4>
+      <p className="tool-list-note">
+        Choose tools from the master list in General requirements. That list is the source of
+        truth. An orange balloon can mark a tool on a photo.
+      </p>
+      {equipment.length === 0 ? (
+        <p className="tool-empty">Add tools to the master list in General requirements first.</p>
+      ) : null}
+      {added.length === 0 && equipment.length ? <p className="tool-empty">No tools chosen for this step yet.</p> : null}
+      {added.length ? (
+        <div className="step-parts">
+          {added.map((tool) => (
+            <div key={tool.id} className="step-part">
+              <Balloon number={tool.balloon} tone="tool" />
+              <span className="step-part-copy">
+                <strong>{tool.identifier || 'Tool'}</strong>
+                {tool.description ? <small>{tool.description}</small> : null}
+              </span>
+              {locked ? (
+                <span />
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => onChange((selectedIds || []).filter((id) => id !== tool.id))}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {locked || available.length === 0 ? null : (
+        <div className="step-part-add">
+          <select aria-label="Tool from the master list" value={choice} onChange={(event) => setChoice(event.target.value)}>
+            <option value="">Choose a tool</option>
+            {available.map((tool) => (
+              <option key={tool.id} value={tool.id}>
+                {tool.balloon}. {tool.identifier || 'Tool'}
+                {tool.description ? ` — ${tool.description}` : ''}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!choice}
+            onClick={() => {
+              if (!choice) return
+              onChange([...(selectedIds || []), choice])
+              setChoice('')
+            }}
+          >
+            Add tool
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -534,6 +612,10 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
       setQuantityEditId(request.id)
       return
     }
+    if (request?.kind === 'bom-renumber') {
+      changeForm((current) => renumberDocumentBom(current))
+      return
+    }
     if (request?.kind === 'bom-add') {
       changeForm((current) => ({
         ...current,
@@ -545,10 +627,12 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
       return
     }
     if (request?.kind === 'bom-remove') {
-      changeForm((current) => ({
-        ...current,
-        bomLines: (current.bomLines || []).filter((line) => line.id !== request.id),
-      }))
+      changeForm((current) =>
+        refreshDocumentReferences({
+          ...current,
+          bomLines: (current.bomLines || []).filter((line) => line.id !== request.id),
+        }),
+      )
       return
     }
     if (request?.kind === 'bom-delete') {
@@ -556,18 +640,20 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
         'Delete the whole bill of materials? Balloons on steps and pictures that point at these parts are removed. The photos stay.',
       )
       if (!confirmed) return
-      changeForm((current) => ({
-        ...current,
-        bomLines: [],
-        coverImages: stripBomBalloons(current.coverImages),
-        completedImages: stripBomBalloons(current.completedImages),
-        bomImages: stripBomBalloons(current.bomImages),
-        steps: (current.steps || []).map((step) => ({
-          ...step,
-          bomLineIds: [],
-          images: stripBomBalloons(step.images),
-        })),
-      }))
+      changeForm((current) =>
+        refreshDocumentReferences({
+          ...current,
+          bomLines: [],
+          coverImages: stripBomBalloons(current.coverImages),
+          completedImages: stripBomBalloons(current.completedImages),
+          bomImages: stripBomBalloons(current.bomImages),
+          steps: (current.steps || []).map((step) => ({
+            ...step,
+            bomLineIds: [],
+            images: stripBomBalloons(step.images),
+          })),
+        }),
+      )
       return
     }
     if (request?.kind === 'obsolete') {
@@ -613,6 +699,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               : 'Right-click a photo and choose Add balloons to mark a part from the bill of materials.'
         }
         images={images}
+        showCalloutIndex={list !== 'steps'}
         locked={locked}
         imageUrls={imageUrls}
         imagesReady={imagesReady}
@@ -969,14 +1056,26 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               onChange={(safety) => changeForm((current) => ({ ...current, safety }))}
             />
           </Field>
+          <Field label="References" wide>
+            <RichTextBox
+              value={form.references}
+              readOnly={locked}
+              placeholder="Drawings, specifications, and related documents."
+              onChange={(references) => changeForm((current) => ({ ...current, references }))}
+            />
+          </Field>
           <ToolList
             title="Tools and equipment"
-            note="List the tools, fixtures, gages, Loctite, adhesives, and other consumables used for this document. Identifier is the tool number, part number, or product name, such as SP-14 or Loctite 243."
+            note="This is the master tool list. Steps choose from these tools, and the wording here is the source of truth. Identifier is the tool number or product name, such as SP-14 or Loctite 243. The orange balloon can be placed on a photo."
             emptyText="No tools or equipment listed yet."
             tools={form.equipment || []}
             legacy={form.toolsEquipment}
             locked={locked}
-            onChangeTools={(equipment) => changeForm((current) => ({ ...current, equipment }))}
+            onChangeTools={(equipment) =>
+              changeForm((current) =>
+                refreshDocumentReferences({ ...current, equipment: assignToolBalloons(equipment) }),
+              )
+            }
             onChangeLegacy={(toolsEquipment) => changeForm((current) => ({ ...current, toolsEquipment }))}
           />
           <div id="edit-bom">
@@ -990,6 +1089,8 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
             onDelete={() => askForPasscode({ kind: 'bom-delete' })}
             onEditQuantity={(id) => askForPasscode({ kind: 'bom-qty', id })}
             onQuantityDone={() => setQuantityEditId(null)}
+            onImport={(parsed) => changeForm((current) => applyImportedBom(current, parsed))}
+            onRenumber={() => askForPasscode({ kind: 'bom-renumber' })}
           />
           </div>
           <Field label="Bill of materials notes" wide hint="Optional. These notes print on the requirements page.">
@@ -1000,16 +1101,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
               onChange={(materialsParts) => changeForm((current) => ({ ...current, materialsParts }))}
             />
           </Field>
-          <Field label="References" wide>
-            <RichTextBox
-              value={form.references}
-              readOnly={locked}
-              placeholder="Drawings, specifications, and related documents."
-              onChange={(references) => changeForm((current) => ({ ...current, references }))}
-            />
-          </Field>
         </div>
-        {gallery('completedImages', null, form.completedImages)}
       </section>
 
       <section className="panel">
@@ -1054,6 +1146,8 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                   <RichTextBox
                     value={step.instruction}
                     readOnly={locked}
+                    parts={form.bomLines || []}
+                    tools={form.equipment || []}
                     invalid={Boolean(errors.fieldErrors.steps) && !plainText(step.instruction)}
                     onChange={(instruction) =>
                       changeForm((current) => ({
@@ -1065,28 +1159,45 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                     }
                   />
                 </Field>
-                <ToolList
-                  title="Tools, consumables, and supplies"
-                  note="Add every item this step uses. Include hand tools, fixtures, gages, Loctite, adhesives, solvents, and other consumables. Identifier is the tool number, part number, or product name, such as SP-14 or Loctite 243."
-                  emptyText="No items on this step yet."
-                  tools={step.tools || []}
-                  legacy={step.toolsOrParts}
-                  locked={locked}
-                  onChangeTools={(tools) =>
-                    changeForm((current) => ({
-                      ...current,
-                      steps: current.steps.map((item) => (item.id === step.id ? { ...item, tools } : item)),
-                    }))
-                  }
-                  onChangeLegacy={(toolsOrParts) =>
-                    changeForm((current) => ({
-                      ...current,
-                      steps: current.steps.map((item) =>
-                        item.id === step.id ? { ...item, toolsOrParts } : item,
-                      ),
-                    }))
-                  }
-                />
+                {(step.tools || []).some((tool) => tool.identifier || tool.description) &&
+                !Array.isArray(step.toolIds) ? (
+                  <ToolList
+                    title="Tools, consumables, and supplies"
+                    note="Add every item this step uses. Include hand tools, fixtures, gages, Loctite, adhesives, solvents, and other consumables. Identifier is the tool number, part number, or product name, such as SP-14 or Loctite 243."
+                    emptyText="No items on this step yet."
+                    tools={step.tools || []}
+                    legacy={step.toolsOrParts}
+                    locked={locked}
+                    onChangeTools={(tools) =>
+                      changeForm((current) => ({
+                        ...current,
+                        steps: current.steps.map((item) => (item.id === step.id ? { ...item, tools } : item)),
+                      }))
+                    }
+                    onChangeLegacy={(toolsOrParts) =>
+                      changeForm((current) => ({
+                        ...current,
+                        steps: current.steps.map((item) =>
+                          item.id === step.id ? { ...item, toolsOrParts } : item,
+                        ),
+                      }))
+                    }
+                  />
+                ) : (
+                  <StepToolPicker
+                    equipment={form.equipment || []}
+                    selectedIds={step.toolIds || []}
+                    locked={locked}
+                    onChange={(toolIds) =>
+                      changeForm((current) => ({
+                        ...current,
+                        steps: current.steps.map((item) =>
+                          item.id === step.id ? { ...item, toolIds, tools: [] } : item,
+                        ),
+                      }))
+                    }
+                  />
+                )}
                 <StepBalloons
                   lines={form.bomLines || []}
                   selectedIds={step.bomLineIds}
@@ -1111,6 +1222,8 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                   <RichTextBox
                     value={step.qualityCheck}
                     readOnly={locked}
+                    parts={form.bomLines || []}
+                    tools={form.equipment || []}
                     placeholder="What must be verified, and what gets recorded."
                     onChange={(qualityCheck) =>
                       changeForm((current) => ({
@@ -1259,6 +1372,7 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
           src={imageUrls[openImage.id]}
           annotations={openImage.annotations || []}
           bomLines={form.bomLines || []}
+          tools={form.equipment || []}
           onCancel={() => setEditingImage(null)}
           onSave={saveImageAnnotations}
           onTrimmed={(blob, annotations) =>
@@ -1355,7 +1469,9 @@ function Editor({ initialDocument, isSaved, onBack, onSave, onCreateRevision, on
                       ? 'Enter the passcode to delete the whole bill of materials.'
                       : passcodeRequest.kind === 'bom-qty'
                         ? 'Enter the passcode to change this quantity.'
-                        : `Enter the passcode to change the status to ${passcodeRequest.status}.`}
+                        : passcodeRequest.kind === 'bom-renumber'
+                          ? 'Enter the passcode to renumber the balloons.'
+                          : `Enter the passcode to change the status to ${passcodeRequest.status}.`}
             </p>
             <label className="field">
               Passcode

@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom'
 import { AnnotationPreview } from './ImageEditor.jsx'
-import { assignBalloons } from './model.js'
+import { assignBalloons, toolsForStep } from './model.js'
 import { plainText, toEditorHtml } from './richText.js'
 
 function RichContent({ value }) {
@@ -30,7 +30,9 @@ function PrintToolList({ title, tools, legacy }) {
         <tbody>
           {rows.map((tool, index) => (
             <tr key={tool.id}>
-              <td>{index + 1}</td>
+              <td>
+                {tool.balloon ? <span className="balloon balloon-tool">{tool.balloon}</span> : index + 1}
+              </td>
               <td>{tool.kind}</td>
               <td>{tool.identifier}</td>
               <td>{tool.description}</td>
@@ -197,7 +199,6 @@ function PrintBalloons({ lines }) {
 function PrintSheet({ doc, imageUrls, onBack, onPrint }) {
   const steps = doc.steps || []
   const coverImages = photoList(doc.coverImages, doc.coverImage)
-  const completedImages = photoList(doc.completedImages, doc.completedImage)
   const coverUrl = coverImages[0] ? imageUrls[coverImages[0].id] : ''
   const bomLines = assignBalloons(doc.bomLines || [])
   const bomById = new Map(bomLines.map((line) => [line.id, line]))
@@ -297,22 +298,12 @@ function PrintSheet({ doc, imageUrls, onBack, onPrint }) {
           <PrintBox title="Purpose" text={doc.purpose} />
           <PrintBox title="Scope" text={doc.scope} />
           <PrintBox title="Safety requirements" text={doc.safety} />
+          <PrintBox title="References" text={doc.references} />
           <PrintToolList title="Tools and equipment" tools={doc.equipment} legacy={doc.toolsEquipment} />
           {plainText(doc.materialsParts) ? (
             <PrintBox title="Bill of materials notes" text={doc.materialsParts} />
           ) : null}
         </div>
-        <div className="print-sheet-media">
-          <section className="print-box">
-            <h3>Completed assembly</h3>
-            <PrintPhotos
-              images={completedImages}
-              imageUrls={imageUrls}
-              emptyLabel="Space for a photo of the completed assembly"
-            />
-          </section>
-        </div>
-        <PrintBox title="References" text={doc.references} />
       </SheetPage>
 
       {bomChunks.map((group, index) => (
@@ -330,8 +321,8 @@ function PrintSheet({ doc, imageUrls, onBack, onPrint }) {
           <table className="print-bom-table">
             <thead>
               <tr>
-                <th>No.</th>
-                <th>Part</th>
+                <th />
+                <th>Component ID</th>
                 <th>Description</th>
                 <th>Qty</th>
               </tr>
@@ -379,7 +370,11 @@ function PrintSheet({ doc, imageUrls, onBack, onPrint }) {
               <PrintBalloons
                 lines={(step.bomLineIds || []).map((id) => bomById.get(id)).filter(Boolean)}
               />
-              <PrintToolList title="Tools, consumables, and supplies" tools={step.tools} legacy={step.toolsOrParts} />
+              <PrintToolList
+                title="Tools, consumables, and supplies"
+                tools={toolsForStep(step, doc.equipment)}
+                legacy={step.toolsOrParts}
+              />
               <PrintBox title="Quality check" text={step.qualityCheck} />
               {plainText(step.safetyNote) ? <PrintBox title="Safety note" text={step.safetyNote} /> : null}
             </div>

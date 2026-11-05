@@ -64,8 +64,20 @@ export function parseDbaBom(text) {
     /component|citem|part number|description|usage|quantity|\bqty\b/.test(cell),
   )
   const data = hasHeader ? rows.slice(1) : rows
+  const lineNo = hasHeader
+    ? column(header, [/line\s*#/, /line\s*no/, /line\s*number/, /^linno$/, /^lineno$/, /^line$/])
+    : -1
   const part = hasHeader
-    ? column(header, [/citemcode/, /^component$/, /part number/, /part no/, /^part$/, /item code/])
+    ? column(header, [
+        /component\s*id/,
+        /componentid/,
+        /citemcode/,
+        /item code/,
+        /part number/,
+        /part no/,
+        /^component$/,
+        /^part$/,
+      ])
     : 0
   const description = hasHeader
     ? column(header, [/^description$/, /descript/, /^notes$/])
@@ -73,9 +85,9 @@ export function parseDbaBom(text) {
   const quantity = hasHeader
     ? column(header, [/usage qty/, /^usage$/, /^quantity$/, /^qty$/])
     : 2
-  const lineNo = hasHeader ? column(header, [/line no/, /^linno$/, /^line$/]) : -1
   const sequence = hasHeader ? column(header, [/^sequence$/, /^stage$/]) : -1
-  const partColumn = part >= 0 ? part : 0
+  let partColumn = part >= 0 ? part : 0
+  if (partColumn === lineNo) partColumn = partColumn === 0 ? 1 : 0
 
   return data
     .map((row) => ({

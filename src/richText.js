@@ -13,6 +13,28 @@ function wrapChildren(node, tag) {
   node.append(wrapper)
 }
 
+function referenceId(value) {
+  return /^[A-Za-z0-9_-]{1,80}$/.test(String(value || ''))
+}
+
+function keepReference(child) {
+  const bomLine = child.getAttribute('data-bom-line') || ''
+  const tool = child.getAttribute('data-tool') || ''
+  if (!referenceId(bomLine) && !referenceId(tool)) return false
+  const span = child.ownerDocument.createElement('span')
+  if (referenceId(bomLine)) {
+    span.setAttribute('data-bom-line', bomLine)
+    span.setAttribute('class', 'part-ref')
+  } else {
+    span.setAttribute('data-tool', tool)
+    span.setAttribute('class', 'tool-ref')
+  }
+  span.setAttribute('contenteditable', 'false')
+  span.textContent = (child.textContent || '').replace(/\s+/g, ' ').trim()
+  child.replaceWith(span)
+  return true
+}
+
 function sanitizeNode(node) {
   for (const child of [...node.childNodes]) {
     if (child.nodeType === Node.TEXT_NODE) continue
@@ -20,6 +42,7 @@ function sanitizeNode(node) {
       child.remove()
       continue
     }
+    if (child.tagName === 'SPAN' && keepReference(child)) continue
     sanitizeNode(child)
     if (child.tagName === 'SPAN') {
       const style = child.getAttribute('style') || ''
@@ -57,6 +80,33 @@ function escapeHtml(value) {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
+}
+
+function refreshSpans(html, attribute, className, byId) {
+  const pattern = new RegExp(`<span\\b[^>]*\\b${attribute}="([^"]+)"[^>]*>[\\s\\S]*?<\\/span>`, 'gi')
+  return String(html || '').replace(pattern, (full, id) => {
+    const item = byId.get(id)
+    if (!item) return ''
+    return `<span ${attribute}="${id}" class="${className}" contenteditable="false">${item.balloon}</span>`
+  })
+}
+
+export function refreshReferenceHtml(html, partsById, toolsById) {
+  const withParts = refreshSpans(html, 'data-bom-line', 'part-ref', partsById || new Map())
+  return refreshSpans(withParts, 'data-tool', 'tool-ref', toolsById || new Map())
+}
+
+export function remapReferenceHtml(html, bomMap, toolMap) {
+  return String(html || '')
+    .replace(/data-bom-line="([^"]+)"/g, (full, id) => {
+      const next = bomMap?.get(id)
+      return next ? `data-bom-line="${next}"` : 'data-removed="1"'
+    })
+    .replace(/data-tool="([^"]+)"/g, (full, id) => {
+      const next = toolMap?.get(id)
+      return next ? `data-tool="${next}"` : 'data-removed="1"'
+    })
+    .replace(/<span\b[^>]*data-removed="1"[^>]*>[\s\S]*?<\/span>/gi, '')
 }
 
 export function toEditorHtml(value) {

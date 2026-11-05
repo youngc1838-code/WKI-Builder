@@ -6,6 +6,7 @@ import {
   LINE_THICKNESS,
   annotationFromDrag,
   CALLOUT_BLUE,
+  TOOL_BALLOON,
   calloutMetrics,
   contentFrame,
   createPlacedAnnotation,
@@ -33,19 +34,33 @@ function clone(value) {
   return structuredClone(value)
 }
 
-function balloonPartNote(item, bomLines) {
+function balloonPartNote(item, bomLines, tools) {
+  if (item.toolId) {
+    const tool = (tools || []).find((entry) => entry.id === item.toolId)
+    const name = tool?.identifier ? ` stays with ${tool.identifier}.` : ' stays with that tool.'
+    return `Orange balloon ${item.number}${name} It shows the number only.`
+  }
   const part = (bomLines || []).find((line) => line.id === item.bomLineId)
   const name = part?.partNumber ? ` stays with ${part.partNumber}.` : ' stays with that part.'
   return `Balloon ${item.number}${name} It shows the number only. Use Text to write on the photo.`
 }
 
-function withBomNumbers(items, bomLines) {
-  const byId = new Map((bomLines || []).map((line) => [line.id, line]))
+function withBomNumbers(items, bomLines, tools) {
+  const parts = new Map((bomLines || []).map((line) => [line.id, line]))
+  const toolMap = new Map((tools || []).map((tool) => [tool.id, tool]))
   return items.map((item) => {
-    if (item.type !== 'callout' || !item.bomLineId) return item
-    const line = byId.get(item.bomLineId)
-    if (!line) return item
-    return { ...item, number: line.balloon, text: '' }
+    if (item.type !== 'callout') return item
+    if (item.bomLineId) {
+      const line = parts.get(item.bomLineId)
+      if (!line) return item
+      return { ...item, number: line.balloon, text: '', color: CALLOUT_BLUE }
+    }
+    if (item.toolId) {
+      const tool = toolMap.get(item.toolId)
+      if (!tool) return item
+      return { ...item, number: tool.balloon, text: '', color: TOOL_BALLOON }
+    }
+    return item
   })
 }
 
@@ -67,7 +82,7 @@ function isHandle(node) {
   return false
 }
 
-function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrimmed }) {
+function ImageEditor({ src, annotations, bomLines = [], tools = [], onCancel, onSave, onTrimmed }) {
   const frameRef = useRef(null)
   const transformerRef = useRef(null)
   const nodeRefs = useRef({})
@@ -82,7 +97,7 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
   const [loadError, setLoadError] = useState('')
   const [items, setItems] = useState([])
   const [tool, setTool] = useState('select')
-  const [balloonId, setBalloonId] = useState('')
+  const [balloonTarget, setBalloonTarget] = useState(null)
   const [color, setColor] = useState(CALLOUT_BLUE)
   const [stroke, setStroke] = useState(LINE_THICKNESS[1].value)
   const [selectedId, setSelectedId] = useState(null)
@@ -104,6 +119,7 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
         const resolved = withBomNumbers(
           resolveAnnotations(annotations, image.naturalWidth, image.naturalHeight),
           bomLines,
+          tools,
         )
         annotationsRef.current = resolved
         initialJsonRef.current = JSON.stringify(resolved)
@@ -292,25 +308,35 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
     }
   }
 
-  function makeCallout(point, extra = {}) {
+  function makeCallout(point, extra = {}, color = CALLOUT_BLUE) {
     const anchor = placeBalloonAnchor(point, imageWidth, imageHeight)
     return createPlacedAnnotation(
       'callout',
       { x: anchor.x, y: anchor.y },
       annotationsRef.current,
-      { color: CALLOUT_BLUE, stroke },
+      { color, stroke },
       { ...extra, tipX: anchor.tipX, tipY: anchor.tipY },
     )
   }
 
-  function placeBalloon(point, lineId) {
-    const line = (bomLines || []).find((item) => item.id === lineId)
-    if (!line || !point) return
-    const created = makeCallout(point, {
-      number: line.balloon,
-      text: '',
-      bomLineId: line.id,
-    })
+  function placeBalloon(point, target) {
+    if (!point || !target) return
+    if (target.kind === 'tool') {
+      const toolItem = (tools || []).find((item) => item.id === target.id)
+      if (!toolItem) return
+      const created = makeCallout(
+        point,
+        { number: toolItem.balloon, text: '', toolId: toolItem.id },
+        TOOL_BALLOON,
+      )
+      if (!created) return
+      replace([...annotationsRef.current, created])
+      setSelectedId(created.id)
+      return
+    }
+    const line = (bomLines || []).find((item) => item.id === target.id)
+    if (!line) return
+    const created = makeCallout(point, { number: line.balloon, text: '', bomLineId: line.id })
     if (!created) return
     replace([...annotationsRef.current, created])
     setSelectedId(created.id)
@@ -335,7 +361,7 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
       return
     }
     if (tool === 'balloon') {
-      placeBalloon(point, balloonId)
+      placeBalloon(point, balloonTarget)
       return
     }
     if (tool === 'callout' || tool === 'text') {
@@ -507,7 +533,9 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
     <EditorShell
       tool={tool}
       setTool={(next) => {
-        if (next === 'balloon' && !balloonId && bomLines[0]) setBalloonId(bomLines[0].id)
+        if (next === 'balloon' && !balloonTarget && bomLines[0]) {
+          setBalloonTarget({ kind: 'part', id: bomLines[0].id })
+        }
         setTool(next)
       }}
       color={color}
@@ -625,32 +653,58 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
         </div>
         <aside className="annotation-side">
           <h4>Add a balloon</h4>
+          <p className="markup-note">
+            Choose a part or a tool, then click it in the photo. Part balloons are blue. Tool balloons are
+            orange. Drag the balloon, or drag the leader point onto the item.
+          </p>
           {bomLines.length === 0 ? (
-            <p className="markup-note">Import a bill of materials first. Then choose a part and click it in the photo.</p>
+            <p className="markup-note">Import a bill of materials before ballooning a part.</p>
           ) : (
-            <>
-              <p className="markup-note">
-                Choose a part, then click that part in the photo. The balloon shows that part’s number and stays
-                tied to it. Drag the balloon, or drag the leader point onto the part. Use Text for words.
-              </p>
-              <ul className="callout-index">
-                {bomLines.map((line) => (
-                  <li key={line.id}>
-                    <button
-                      type="button"
-                      className={tool === 'balloon' && balloonId === line.id ? 'markup-select selected' : 'markup-select'}
-                      onClick={() => {
-                        setBalloonId(line.id)
-                        setTool('balloon')
-                      }}
-                    >
-                      {line.balloon}. {line.partNumber || 'Part'}
-                      {line.description ? ` · ${line.description}` : ''}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
+            <ul className="callout-index">
+              {bomLines.map((line) => (
+                <li key={line.id}>
+                  <button
+                    type="button"
+                    className={
+                      tool === 'balloon' && balloonTarget?.kind === 'part' && balloonTarget.id === line.id
+                        ? 'markup-select selected'
+                        : 'markup-select'
+                    }
+                    onClick={() => {
+                      setBalloonTarget({ kind: 'part', id: line.id })
+                      setTool('balloon')
+                    }}
+                  >
+                    {line.balloon}. {line.partNumber || 'Part'}
+                    {line.description ? ` · ${line.description}` : ''}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(tools || []).length === 0 ? (
+            <p className="markup-note">Add tools to the master list before ballooning a tool.</p>
+          ) : (
+            <ul className="callout-index">
+              {tools.map((toolItem) => (
+                <li key={toolItem.id}>
+                  <button
+                    type="button"
+                    className={
+                      tool === 'balloon' && balloonTarget?.kind === 'tool' && balloonTarget.id === toolItem.id
+                        ? 'markup-select selected'
+                        : 'markup-select'
+                    }
+                    onClick={() => {
+                      setBalloonTarget({ kind: 'tool', id: toolItem.id })
+                      setTool('balloon')
+                    }}
+                  >
+                    Tool {toolItem.balloon}. {toolItem.identifier || 'Tool'}
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
           <h4>Selected mark</h4>
           {selected?.type === 'text' ? (
@@ -674,8 +728,8 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
             </label>
           ) : null}
           {selected?.type === 'callout' ? (
-            selected.bomLineId ? (
-              <p className="markup-note">{balloonPartNote(selected, bomLines)}</p>
+            selected.bomLineId || selected.toolId ? (
+              <p className="markup-note">{balloonPartNote(selected, bomLines, tools)}</p>
             ) : (
               <label className="field">
                 <span className="field-label">Callout number</span>
@@ -787,7 +841,7 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
           }}
           onAddBalloon={() => {
             if (!menu.point) return
-            placeBalloon(menu.point, balloonId)
+            placeBalloon(menu.point, balloonTarget)
             setMenu(null)
           }}
           onAddText={() => {
@@ -799,7 +853,7 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
             setTool('select')
             setMenu(null)
           }}
-          balloonReady={Boolean(balloonId)}
+          balloonReady={Boolean(balloonTarget)}
           onFit={() => {
             setZoom(1)
             setPan({ x: 0, y: 0 })
@@ -827,7 +881,10 @@ function ImageEditor({ src, annotations, bomLines = [], onCancel, onSave, onTrim
 }
 
 function markLabel(item) {
-  if (item.type === 'callout') return item.bomLineId ? `Balloon ${item.number}` : `Callout ${item.number}`
+  if (item.type === 'callout') {
+    if (item.toolId) return `Tool balloon ${item.number}`
+    return item.bomLineId ? `Balloon ${item.number}` : `Callout ${item.number}`
+  }
   if (item.type === 'text') return `Text. ${item.text.trim() || 'Text'}`
   if (item.type === 'arrow') return 'Arrow'
   if (item.type === 'rect') return 'Rectangle'
